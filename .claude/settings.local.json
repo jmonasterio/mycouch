@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(dir:*)",
+      "WebFetch(domain:clerk.com)"
+    ],
+    "additionalDirectories": [
+      "c:\\github\\roady"
+    ]
+  }
+}

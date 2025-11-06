@@ -1,0 +1,7 @@
+{
+  "comment": "This file contains API key mappings. DO NOT COMMIT THE REAL FILE TO VERSION CONTROL.",
+  "comment2": "For production, load API keys from environment variables or a secure secrets manager.",
+  "comment3": "Keys are: api_key => client_id",
+  "example_api_key_1": "example_client_1",
+  "example_api_key_2": "example_client_2"
+}

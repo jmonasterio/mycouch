@@ -1,0 +1,76 @@
+name: Deploy CouchDB JWT Proxy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy via SCP
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || 22 }}
+        run: |
+          # Create SSH directory
+          mkdir -p ~/.ssh
+
+          # Add SSH private key
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # Add host to known_hosts (prevent interactive prompt)
+          ssh-keyscan -p $DEPLOY_PORT $DEPLOY_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          # Copy proxy files via SCP
+          echo "Copying proxy files to server..."
+          scp -P $DEPLOY_PORT -i ~/.ssh/deploy_key -r \
+            main.py pyproject.toml .env.example \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/couchdb-proxy-update/"
+
+          # SSH into server and run deployment commands
+          echo "Running deployment commands..."
+          ssh -p $DEPLOY_PORT -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" << 'EOF'
+            set -e
+
+            echo "Step 1: Stopping proxy service..."
+            sudo systemctl stop couchdb-proxy || true
+
+            echo "Step 2: Copying updated files..."
+            sudo cp -r /tmp/couchdb-proxy-update/* /opt/couchdb-jwt-proxy/
+            sudo chown -R nobody:nogroup /opt/couchdb-jwt-proxy
+            sudo chmod -R 755 /opt/couchdb-jwt-proxy
+
+            echo "Step 3: Reinstalling dependencies..."
+            cd /opt/couchdb-jwt-proxy
+            uv sync --frozen || pip3 install -r requirements.txt
+
+            echo "Step 4: Starting proxy service..."
+            sudo systemctl start couchdb-proxy
+
+            echo "Step 5: Verifying service is running..."
+            sudo systemctl status couchdb-proxy
+
+            echo "Step 6: Testing health endpoint..."
+            sleep 2
+            curl -s http://localhost:5985/health | head -c 100
+            echo ""
+
+            echo "Step 7: Checking recent logs..."
+            sudo journalctl -u couchdb-proxy -n 20 --no-pager
+
+            echo "Deployment complete!"
+          EOF
+
+          # Cleanup
+          rm ~/.ssh/deploy_key
+        shell: bash
