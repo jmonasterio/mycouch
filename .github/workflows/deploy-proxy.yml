@@ -53,7 +53,7 @@ jobs:
 
           # Copy proxy files via SCP
           echo "Copying proxy files to server..."
-          scp -P $DEPLOY_PORT -i ~/.ssh/deploy_key -r \
+          scp -vv -P $DEPLOY_PORT -i ~/.ssh/deploy_key -r \
             src/couchdb_jwt_proxy/ pyproject.toml .env.example \
             "$DEPLOY_USER@$DEPLOY_HOST:/tmp/couchdb-proxy-update/"
 
