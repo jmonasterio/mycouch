@@ -51,10 +51,14 @@ jobs:
           # Add host to known_hosts (prevent interactive prompt)
           ssh-keyscan -p $DEPLOY_PORT $DEPLOY_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
 
+          # Create target directory on server
+          echo "Creating deployment directory on server..."
+          ssh -p $DEPLOY_PORT -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p /tmp/couchdb-proxy-update"
+
           # Copy proxy files via SCP
           echo "Copying proxy files to server..."
-          scp -vv -P $DEPLOY_PORT -i ~/.ssh/deploy_key -r \
-            src/couchdb_jwt_proxy/ pyproject.toml .env.example \
+          scp -P $DEPLOY_PORT -i ~/.ssh/deploy_key -r \
+            src/ pyproject.toml .env.example \
             "$DEPLOY_USER@$DEPLOY_HOST:/tmp/couchdb-proxy-update/"
 
           # SSH into server and run deployment commands
