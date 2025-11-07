@@ -67,28 +67,28 @@ jobs:
             set -e
 
             echo "Step 1: Stopping proxy service..."
-            sudo systemctl stop couchdb-proxy || true
+            sudo -n systemctl stop couchdb-proxy || true
 
             echo "Step 2: Copying updated files..."
             # Copy the src directory contents to preserve structure
             if [ -d "/tmp/couchdb-proxy-update/src" ]; then
-              sudo cp -r /tmp/couchdb-proxy-update/src /opt/couchdb-jwt-proxy/
+              sudo -n cp -r /tmp/couchdb-proxy-update/src /opt/couchdb-jwt-proxy/
             fi
             # Copy root files (pyproject.toml, .env.example)
-            sudo cp /tmp/couchdb-proxy-update/pyproject.toml /opt/couchdb-jwt-proxy/ 2>/dev/null || true
-            sudo cp /tmp/couchdb-proxy-update/.env.example /opt/couchdb-jwt-proxy/ 2>/dev/null || true
-            sudo chown -R nobody:nogroup /opt/couchdb-jwt-proxy
-            sudo chmod -R 755 /opt/couchdb-jwt-proxy
+            sudo -n cp /tmp/couchdb-proxy-update/pyproject.toml /opt/couchdb-jwt-proxy/ 2>/dev/null || true
+            sudo -n cp /tmp/couchdb-proxy-update/.env.example /opt/couchdb-jwt-proxy/ 2>/dev/null || true
+            sudo -n chown -R nobody:nogroup /opt/couchdb-jwt-proxy
+            sudo -n chmod -R 755 /opt/couchdb-jwt-proxy
 
             echo "Step 3: Reinstalling dependencies..."
             cd /opt/couchdb-jwt-proxy
             uv sync --frozen || pip3 install -r requirements.txt
 
             echo "Step 4: Starting proxy service..."
-            sudo systemctl start couchdb-proxy
+            sudo -n systemctl start couchdb-proxy
 
             echo "Step 5: Verifying service is running..."
-            sudo systemctl status couchdb-proxy
+            sudo -n systemctl status couchdb-proxy
 
             echo "Step 6: Testing health endpoint..."
             sleep 2
@@ -96,7 +96,7 @@ jobs:
             echo ""
 
             echo "Step 7: Checking recent logs..."
-            sudo journalctl -u couchdb-proxy -n 20 --no-pager
+            sudo -n journalctl -u couchdb-proxy -n 20 --no-pager
 
             echo "Deployment complete!"
           EOF
