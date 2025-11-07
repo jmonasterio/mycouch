@@ -70,6 +70,9 @@ jobs:
             sudo -n systemctl stop couchdb-proxy || true
 
             echo "Step 2: Copying updated files..."
+            # NOTE: Requires passwordless sudo configured in /etc/sudoers.d/deploy
+            # with paths pointing to /bin/ (not /usr/bin/) since Ubuntu symlinks them there
+            # Example: jm ALL=(ALL) NOPASSWD: /bin/cp, /bin/chown, /bin/chmod
             # Copy everything from /tmp to /opt, preserving directory structure
             sudo -n cp -r /tmp/couchdb-proxy-update/src /opt/couchdb-jwt-proxy/ 2>/dev/null || true
             sudo -n cp /tmp/couchdb-proxy-update/pyproject.toml /opt/couchdb-jwt-proxy/ 2>/dev/null || true
@@ -82,7 +85,8 @@ jobs:
 
             echo "Step 3: Reinstalling dependencies..."
             cd /opt/couchdb-jwt-proxy
-            uv sync --frozen || pip3 install -r requirements.txt
+            # Use full path to uv since it's installed in ~/.local/bin
+            ~/.local/bin/uv sync --frozen || pip3 install -r requirements.txt
 
             echo "Step 4: Starting proxy service..."
             sudo -n systemctl start couchdb-proxy
