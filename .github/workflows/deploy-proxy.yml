@@ -58,7 +58,7 @@ jobs:
           # Copy proxy files via SCP
           echo "Copying proxy files to server..."
           scp -P $DEPLOY_PORT -i ~/.ssh/deploy_key -r \
-            src/ pyproject.toml .env.example \
+            src pyproject.toml .env.example \
             "$DEPLOY_USER@$DEPLOY_HOST:/tmp/couchdb-proxy-update/"
 
           # SSH into server and run deployment commands
@@ -70,15 +70,15 @@ jobs:
             sudo -n systemctl stop couchdb-proxy || true
 
             echo "Step 2: Copying updated files..."
-            # Copy the src directory contents to preserve structure
-            if [ -d "/tmp/couchdb-proxy-update/src" ]; then
-              sudo -n cp -r /tmp/couchdb-proxy-update/src /opt/couchdb-jwt-proxy/
-            fi
-            # Copy root files (pyproject.toml, .env.example)
+            # Copy everything from /tmp to /opt, preserving directory structure
+            sudo -n cp -r /tmp/couchdb-proxy-update/src /opt/couchdb-jwt-proxy/ 2>/dev/null || true
             sudo -n cp /tmp/couchdb-proxy-update/pyproject.toml /opt/couchdb-jwt-proxy/ 2>/dev/null || true
             sudo -n cp /tmp/couchdb-proxy-update/.env.example /opt/couchdb-jwt-proxy/ 2>/dev/null || true
+
+            # Ensure proper ownership and permissions
             sudo -n chown -R nobody:nogroup /opt/couchdb-jwt-proxy
             sudo -n chmod -R 755 /opt/couchdb-jwt-proxy
+            sudo -n chmod 600 /opt/couchdb-jwt-proxy/.env 2>/dev/null || true
 
             echo "Step 3: Reinstalling dependencies..."
             cd /opt/couchdb-jwt-proxy
