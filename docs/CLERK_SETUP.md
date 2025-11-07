@@ -7,7 +7,6 @@ This guide explains how to configure the proxy to validate **Clerk JWTs** instea
 Using Clerk JWTs provides:
 - ✅ Enterprise authentication via Clerk
 - ✅ User management built-in
-- ✅ No need to manage JWT_SECRET
 - ✅ RS256 asymmetric signing (more secure)
 - ✅ Can still fall back to custom JWT if needed
 
@@ -30,9 +29,6 @@ From your Clerk dashboard:
 Edit `.env`:
 
 ```bash
-# Enable Clerk JWT validation
-ENABLE_CLERK_JWT=true
-
 # Your Clerk issuer URL
 CLERK_ISSUER_URL=https://your-clerk-instance.clerk.accounts.dev
 ```
@@ -69,20 +65,13 @@ You should see in logs:
    - Validates signature using public key
    - Checks expiration, issuer, etc.
 
-4a. If Clerk JWT valid → Allow request ✓
-
-4b. If Clerk JWT invalid → Try custom JWT (HS256)
-   - Validates with JWT_SECRET
-   - If valid → Allow request ✓
-   - If invalid → Return 401 ✗
-```
+4. If Clerk JWT valid → Allow request ✓
 
 ### Key Points
 
 - **RS256 validation:** Clerk uses asymmetric signing (public/private keys)
 - **JWKS caching:** Public keys are cached to avoid hitting Clerk API on every request
 - **Fallback mode:** Can still accept custom JWTs for testing/migration
-- **No JWT_SECRET needed:** Can be ignored when using Clerk
 
 ## Extracting User Info from Clerk JWT
 
@@ -175,7 +164,6 @@ echo $TOKEN | cut -d. -f2 | base64 -d | jq .
 **Solution:** Check:
 1. CLERK_ISSUER_URL is correct
 2. Network connection to Clerk
-3. ENABLE_CLERK_JWT is true
 
 ```bash
 # Test manually
@@ -223,7 +211,6 @@ DEBUG:main:Clerk JWT validation failed: ..., trying custom JWT
 This is fine! The proxy is working as designed - falling back to custom JWT.
 
 To disable fallback (require Clerk only):
-- Remove JWT_SECRET from .env
 - Won't work, but logs will be clearer about what's failing
 
 ## Performance Notes
@@ -244,7 +231,6 @@ To disable fallback (require Clerk only):
 
 ## Production Checklist
 
-- [ ] ENABLE_CLERK_JWT=true
 - [ ] CLERK_ISSUER_URL set correctly
 - [ ] HTTPS enabled for proxy
 - [ ] HTTPS enabled for Clerk (always)
@@ -253,14 +239,6 @@ To disable fallback (require Clerk only):
 - [ ] Test token refresh (after 1 hour)
 
 ## Migration Path
-
-1. **Phase 1:** Enable ENABLE_CLERK_JWT=true with custom JWT fallback
-   - Accept both Clerk and custom JWTs
-   - Verify Clerk works without breaking existing clients
-
-2. **Phase 2:** Remove JWT_SECRET from production
-   - Forces Clerk JWT only
-   - Commits to Clerk auth
 
 ## More Information
 

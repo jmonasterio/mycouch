@@ -103,7 +103,6 @@ The PWA runs locally on the user's device, stores data in PouchDB, and synchroni
 
 **Proxy Environment:**
 ```bash
-JWT_SECRET=super-secret-jwt-key-change-in-production
 COUCHDB_INTERNAL_URL=http://localhost:5983  # Internal CouchDB
 PROXY_PORT=5984  # Public-facing port
 ```
@@ -433,7 +432,6 @@ async function init() {
 2. **JWT Proxy:**
    - Deploy with gunicorn/uvicorn on public port (5984)
    - HTTPS only
-   - Strong JWT_SECRET (environment variable)
    - Rotate API keys regularly
    - Rate limiting (future phase)
 
@@ -522,8 +520,6 @@ async function init() {
 
 ### CouchDB JWT Proxy (mycouch/)
 - `main.py` - FastAPI application
-- `config/api_keys.json` - API key configuration
-- `.env` - Environment variables (JWT_SECRET, etc.)
 - `Makefile` / `run.ps1` / `run.bat` - Build commands
 
 ### Roady PWA (roady/)
@@ -560,7 +556,6 @@ async function init() {
 ## Notes & Assumptions
 
 1. **HTTPS in Production:** All communication should use HTTPS
-2. **JWT_SECRET:** Generate strong random key, rotate regularly
 3. **API Key Model:** Current MVP uses single API key for PWA; future phase may use per-user credentials
 4. **CouchDB Replication:** Native CouchDB replication between local and remote DB recommended for conflict resolution
 5. **Offline Queue:** PouchDB handles queueing edits during offline; no additional queue needed

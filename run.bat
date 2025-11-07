@@ -55,22 +55,24 @@ goto end
 
 :run
 echo Starting CouchDB JWT Proxy...
-call uv run python main.py
+set PYTHONPATH=src
+call uv run python -m couchdb_jwt_proxy.main
 goto end
 
 :dev-run
 echo Starting proxy with auto-reload...
-call uv run uvicorn main:app --reload --port 5984
+set PYTHONPATH=src
+call uv run uvicorn couchdb_jwt_proxy.main:app --reload --port 5985
 goto end
 
 :test
 echo Running tests...
-call uv run pytest test_main.py -v
+call uv run pytest tests -v
 goto end
 
 :test-cov
 echo Running tests with coverage...
-call uv run pytest test_main.py -v --cov=main --cov-report=html --cov-report=term-missing
+call uv run pytest tests -v --cov=couchdb_jwt_proxy --cov-report=html --cov-report=term-missing
 echo.
 echo [OK] Coverage report: htmlcov/index.html
 goto end

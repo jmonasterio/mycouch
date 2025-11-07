@@ -27,8 +27,6 @@ mycouch/
 ├── run.bat               # Windows CMD script
 ├── main.py               # FastAPI application
 ├── test_main.py          # Unit tests
-├── config/
-│   └── api_keys.json     # API key configuration
 └── .env.example          # Environment template
 ```
 
@@ -144,7 +142,6 @@ Contains all project metadata and dependencies:
 ### .env.example
 Template for environment variables:
 ```bash
-JWT_SECRET=your-super-secret-key-change-this
 COUCHDB_INTERNAL_URL=http://localhost:5983
 PROXY_PORT=5984
 LOG_LEVEL=INFO

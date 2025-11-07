@@ -248,7 +248,6 @@ mycouch/
 │   ├── sw.js                 # Service worker
 │   └── README.md             # PWA documentation
 ├── main.py                   # JWT Proxy (existing)
-├── config/api_keys.json      # API keys (existing)
 └── CLAUDE.md                 # Guidance for Claude Code
 ```
 
@@ -439,21 +438,6 @@ curl -X POST http://localhost:5984/admin/_find \
   }'
 ```
 
-### API Key Configuration
-
-Update `config/api_keys.json` with app identifiers:
-```json
-{
-  "mycouch-admin-key": "admin",
-  "roady-pwa-key": "roady",
-  "custom-app-key": "custom"
-}
-```
-
-Each key can be rotated independently. Roady and other apps use their own keys.
-
----
-
 ## Multi-Tenancy Implementation
 
 ### Tenant Isolation Strategy
@@ -568,7 +552,6 @@ PouchDB provides conflict resolution. In MVP:
 
 ### JWT & Tokens
 - ✅ Tokens expire in 1 hour (refresh required)
-- ✅ JWT_SECRET is environment variable (never in code)
 - ✅ API keys stored as hashes in CouchDB
 - ⚠️ TODO: Implement token refresh endpoint
 - ⚠️ TODO: Add API key expiration support

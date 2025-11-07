@@ -35,10 +35,6 @@ mycouch/
 │   ├── PRD-jwt-proxy.md                # JWT strategy
 │   └── prd-tenant-creation.md          # Multi-tenant model
 │
-├── config/                             # Configuration
-│   ├── api_keys.json                   # API keys (in .gitignore)
-│   └── api_keys.json.example           # API keys template
-│
 ├── .github/
 │   └── workflows/
 │       └── deploy-proxy.yml            # GitHub Actions workflow
@@ -88,8 +84,6 @@ Unit and integration tests using pytest.
 Utility scripts for development and operations.
 
 **Planned contents:**
-- `generate_secret.py` - Generate secure JWT_SECRET
-- `generate_jwt.py` - Generate test JWT tokens
 - `run_local_couchdb.sh` - Docker CouchDB startup
 
 ### `docs/`
@@ -110,13 +104,6 @@ Product Requirements Documents describing vision and design.
 - PRD.md - Overall product vision
 - PRD-jwt-proxy.md - JWT authentication strategy
 - prd-tenant-creation.md - Multi-tenant CouchDB model
-
-### `config/`
-Configuration files for API keys and secrets.
-
-**Contents:**
-- `api_keys.json` - Actual API keys (in .gitignore)
-- `api_keys.json.example` - Template
 
 ### `.github/workflows/`
 GitHub Actions CI/CD configuration.

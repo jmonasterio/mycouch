@@ -6,12 +6,33 @@ This file provides guidance to Claude Code when working with this repository.
 
 **MyCouch (CouchDB JWT Proxy)** is a secure HTTP proxy for CouchDB providing:
 
-- **JWT Authentication**: Supports both Clerk JWT (RS256, enterprise) and custom JWT (HS256, simple)
+- **JWT Authentication**: Clerk JWT (RS256) with public key cryptography
 - **Multi-Tenant Data Isolation**: Optional tenant-level access control
 - **Offline-First Support**: Long-polling for PouchDB real-time sync
 - **Production-Ready**: Deployed to Linux servers via GitHub Actions
 
 **Primary Use Case**: Serves as the authentication gateway for **Roady PWA** (band management app).
+
+## Claude Code Usage Guidelines
+
+**IMPORTANT**: When using file operation tools like `Read()`, `Write()`, and `Edit()`:
+- Always use **full absolute paths** with **forward slashes** (`/`)
+- Example: `C:/github/mycouch/src/couchdb_jwt_proxy/main.py`
+- Never use backslashes or relative paths
+- This prevents file access errors on Windows systems
+
+**Correct Examples:**
+```python
+Read("C:/github/mycouch/src/couchdb_jwt_proxy/main.py")
+Write("C:/github/mycouch/.env.example", content)
+Edit("C:/github/mycouch/CLAUDE.md", old_string, new_string)
+```
+
+**Incorrect Examples (will fail):**
+```python
+Read("C:\\github\\mycouch\\main.py")  # Backslashes
+Read("src/couchdb_jwt_proxy/main.py")  # Relative path
+```
 
 ## Architecture
 
@@ -27,8 +48,6 @@ This file provides guidance to Claude Code when working with this repository.
 │  CouchDB JWT Proxy (FastAPI)            │
 │  Port 5985 (production: behind Nginx)    │
 │  - Clerk JWT validation (RS256)         │
-│  - Custom JWT validation (HS256)        │
-│  - Automatic fallback between auth      │
 │  - Multi-tenant isolation               │
 │  - Long-polling support                 │
 │  - Content-Type header fixing           │
@@ -46,18 +65,11 @@ This file provides guidance to Claude Code when working with this repository.
 ### Authentication Flow
 
 ```
-Client Request with JWT
+Client Request with Clerk JWT
   ↓
-[1] Try Clerk JWT validation (RS256)
+Clerk JWT validation (RS256)
     - Fetch signing keys from Clerk JWKS
     - Verify signature and claims
-    ↓
-    [SUCCESS] → Allow request
-    [FAIL] → Continue to [2]
-  ↓
-[2] Try Custom JWT validation (HS256)
-    - Verify signature with JWT_SECRET
-    - Check expiration
     ↓
     [SUCCESS] → Allow request
     [FAIL] → Return 401 Unauthorized
@@ -71,9 +83,6 @@ Single-file FastAPI application (~650 lines):
 
 **Authentication Functions:**
 - `verify_clerk_jwt()` - RS256 validation using PyJWKClient (cached JWKS)
-- `verify_jwt_token()` - HS256 validation with JWT_SECRET
-- `create_jwt_token()` - Generate custom JWT from API key
-- Fallback logic: Tries Clerk first, falls back to custom JWT
 
 **Proxy Functions:**
 - `proxy_couchdb()` - Main request handler
@@ -89,18 +98,15 @@ Single-file FastAPI application (~650 lines):
 - Query rewriting for `_all_docs` and `_find`
 
 **Configuration Validation:**
-- Fails on startup if JWT_SECRET missing (when not using Clerk)
-- Fails on startup if CLERK_ISSUER_URL missing (when Clerk enabled)
+- Fails on startup if CLERK_ISSUER_URL missing
 - Clear error messages guide users to correct setup
 
 ### Configuration Files
 
 **.env** (local development, in .gitignore)
 ```
-# Authentication (choose one or both)
-ENABLE_CLERK_JWT=true|false
+# Authentication
 CLERK_ISSUER_URL=https://your-instance.clerk.accounts.dev
-JWT_SECRET=<generated-secret>
 
 # CouchDB
 COUCHDB_INTERNAL_URL=http://localhost:5984
@@ -122,13 +128,7 @@ LOG_LEVEL=DEBUG|INFO|WARNING|ERROR
 
 **.env.example** (template with documentation)
 - Comprehensive comments explaining each setting
-- Instructions for generating secure JWT_SECRET
-- Different configurations for Clerk vs custom JWT
-
-**config/api_keys.json** (local only, in .gitignore)
-- Only needed for custom JWT mode
-- Maps API keys to client IDs
-- Example: `{"api-key-1": "client-name"}`
+- Instructions for configuring Clerk
 
 ### Deployment
 
@@ -161,7 +161,7 @@ uv sync --all-extras       # Include dev/test dependencies
 
 # Create local .env
 cp .env.example .env
-nano .env                  # Set JWT_SECRET and CouchDB credentials
+nano .env                  # Set CLERK_ISSUER_URL and CouchDB credentials
 
 # Start CouchDB
 docker-compose up -d       # or manually: docker run -d -p 5984:5984 couchdb:3
@@ -189,19 +189,14 @@ uv run pytest test_main.py -v --looponfail
 ### Manual Testing
 
 ```bash
-# Get custom JWT token
-curl -X POST http://localhost:5985/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"api_key": "test-key"}'
+# Get Clerk JWT token (use token from Clerk SDK in your app)
+# const token = await window.Clerk.session.getToken();
 
 # Use token to query CouchDB
-curl -H "Authorization: Bearer TOKEN" http://localhost:5985/_all_dbs
+curl -H "Authorization: Bearer YOUR_CLERK_TOKEN" http://localhost:5985/_all_dbs
 
 # Check health
 curl http://localhost:5985/health
-
-# Test Clerk JWT (use token from Clerk SDK)
-curl -H "Authorization: Bearer $CLERK_TOKEN" http://localhost:5985/_all_dbs
 ```
 
 ## Critical Implementation Details
@@ -217,15 +212,6 @@ CouchDB requires `Content-Type: application/json` for POST/PUT requests. PouchDB
 CouchDB `_changes?feed=longpoll` connections wait indefinitely for changes. Default 30-second timeout kills these connections. **Solution:** Detect long-polling and use 300-second timeout.
 
 **Code:** main.py lines 546-548
-
-### JWT Validation Fallback
-
-Allows smooth transition between authentication methods:
-- Start with Clerk only
-- Later add custom JWT for testing/internal tools
-- Then switch entirely to custom JWT if needed
-
-**Code:** main.py lines 420-432
 
 ### Multi-Tenant Isolation
 
@@ -290,16 +276,14 @@ When enabled, ensures:
 ### Secrets Management
 
 - ✅ `.env` in .gitignore (never committed)
-- ✅ `config/api_keys.json` in .gitignore
 - ✅ No hardcoded defaults for secrets
 - ✅ Configuration validation on startup
 
 ### Authentication
 
 - ✅ Clerk JWT: RS256 with public key caching
-- ✅ Custom JWT: HS256 with strong secret requirement
+- ✅ No shared secrets - uses public/private key cryptography
 - ✅ Token expiration enforced
-- ✅ Automatic fallback doesn't leak secrets
 
 ### Multi-Tenant
 
@@ -336,8 +320,7 @@ LOG_LEVEL=DEBUG
 
 ### Check JWT Validity
 ```bash
-# Decode token at https://jwt.io
-# Use JWT_SECRET as the signing key
+# Decode JWT 
 ```
 
 ### Verify CouchDB Connection
@@ -347,14 +330,9 @@ curl -u admin:password http://localhost:5984/
 ```
 
 ### Test Token Generation
-```bash
-# Custom JWT
-curl -X POST http://localhost:5985/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"api_key": "test-key"}'
-
-# Clerk JWT (use Clerk SDK to get token)
-const token = await Clerk.session.getToken()
+```javascript
+// Clerk JWT (use Clerk SDK to get token)
+const token = await window.Clerk.session.getToken()
 ```
 
 ### Inspect Proxy Logs
@@ -368,11 +346,10 @@ sudo journalctl -u couchdb-proxy | grep "401\|ERROR"
 
 ## Known Limitations
 
-1. **API Key Management**: Currently static config file, could be database-backed
-2. **Rate Limiting**: Not implemented, consider adding
-3. **Audit Logging**: Limited to application logs
-4. **Scoped Access**: All tokens have full access, could add scopes
-5. **Database Quotas**: No per-database resource limits
+1. **Rate Limiting**: Not implemented, consider adding
+2. **Audit Logging**: Limited to application logs
+3. **Scoped Access**: All tokens have full access, could add scopes
+4. **Database Quotas**: No per-database resource limits
 
 ## Related Projects
 
@@ -387,8 +364,7 @@ sudo journalctl -u couchdb-proxy | grep "401\|ERROR"
 - [ ] Dependencies installed (`uv sync`)
 - [ ] CouchDB running on localhost:5984
 - [ ] `.env` file created with valid settings
-- [ ] `config/api_keys.json` exists (even if empty)
-- [ ] `JWT_SECRET` set for custom JWT mode
+- [ ] `CLERK_ISSUER_URL` set in `.env`
 - [ ] Tests pass (`uv run pytest test_main.py`)
 - [ ] Proxy starts (`uv run uvicorn main:app`)
 

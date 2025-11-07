@@ -28,20 +28,20 @@ dev:
 	uv sync --all-extras
 
 run:
-	uv run python main.py
+	PYTHONPATH=src uv run python -m couchdb_jwt_proxy.main
 
 dev-run:
-	uv run uvicorn main:app --reload --port 5984
+	PYTHONPATH=src uv run uvicorn couchdb_jwt_proxy.main:app --reload --port 5985
 
 test:
-	uv run pytest test_main.py -v
+	uv run pytest tests -v
 
 test-cov:
-	uv run pytest test_main.py -v --cov=main --cov-report=html --cov-report=term-missing
+	uv run pytest tests -v --cov=couchdb_jwt_proxy --cov-report=html --cov-report=term-missing
 	@echo "Coverage report: htmlcov/index.html"
 
 test-watch:
-	uv run pytest test_main.py -v --looponfail
+	uv run pytest tests -v --looponfail
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
@@ -59,10 +59,10 @@ env-setup:
 	fi
 
 format:
-	uv run black main.py test_main.py
-	uv run isort main.py test_main.py
+	uv run black src/couchdb_jwt_proxy tests
+	uv run isort src/couchdb_jwt_proxy tests
 
 lint:
-	uv run flake8 main.py test_main.py
-	uv run black --check main.py test_main.py
-	uv run isort --check-only main.py test_main.py
+	uv run flake8 src/couchdb_jwt_proxy tests
+	uv run black --check src/couchdb_jwt_proxy tests
+	uv run isort --check-only src/couchdb_jwt_proxy tests

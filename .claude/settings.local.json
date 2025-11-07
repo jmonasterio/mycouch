@@ -4,7 +4,10 @@
       "Bash(cat:*)",
       "Bash(dir:*)",
       "WebFetch(domain:clerk.com)",
-      "WebFetch(domain:code.claude.com)"
+      "WebFetch(domain:code.claude.com)",
+      "Bash(git -C /c/github/mycouch status)",
+      "Bash(py -m py_compile:*)",
+      "Bash(uv sync:*)"
     ],
     "additionalDirectories": [
       "c:\\github\\roady"

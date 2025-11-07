@@ -1,1 +1,1 @@
-uv run uvicorn main:app --port 5985
+PYTHONPATH=src uv run uvicorn couchdb_jwt_proxy.main:app --port 5985

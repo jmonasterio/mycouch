@@ -63,7 +63,6 @@ cp .env.example .env
 
 Review `.env` - it should contain:
 ```bash
-JWT_SECRET=your-super-secret-key-change-this-in-production
 COUCHDB_INTERNAL_URL=http://localhost:5984
 PROXY_PORT=5985
 LOG_LEVEL=INFO
@@ -223,8 +222,6 @@ You can access CouchDB's web UI for admin tasks:
 ## Credentials
 
 - **CouchDB Admin:** admin/admin
-- **API Key for Proxy:** test-key (defined in `config/api_keys.json`)
-- **JWT Secret:** defined in `.env` file
 
 ## Troubleshooting
 
@@ -245,8 +242,6 @@ uv run uvicorn main:app --reload --port 5985
 ```
 
 ### "Invalid API key" error
-**Problem:** API key "test-key" not found
-**Solution:** Check `config/api_keys.json` contains "test-key"
 
 ### "Invalid or expired token"
 **Problem:** Token has expired (tokens last 1 hour)
@@ -263,9 +258,7 @@ curl http://localhost:5984/  # Test CouchDB directly
 ## Next Steps
 
 1. **Test with Roady PWA:** Update Roady to use proxy instead of direct CouchDB
-2. **Add more API keys:** Edit `config/api_keys.json` for other clients
 3. **Production setup:** See README.md for production configuration
-4. **Security:** Change JWT_SECRET in `.env` for production
 
 ## File Structure
 
@@ -273,8 +266,6 @@ curl http://localhost:5984/  # Test CouchDB directly
 mycouch/
 ├── main.py                      # FastAPI application
 ├── test_main.py                 # Unit tests
-├── config/
-│   └── api_keys.json           # API key mappings
 ├── .env.example                 # Environment template
 ├── .env                         # Your local configuration
 ├── docker-compose.yml           # CouchDB Docker setup

@@ -4,16 +4,13 @@ import httpx
 import jwt
 import logging
 import base64
-from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
-from pathlib import Path
 from functools import lru_cache
 from jwt import PyJWKClient
 
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv
 
@@ -21,7 +18,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-JWT_SECRET = os.getenv("JWT_SECRET")
 COUCHDB_INTERNAL_URL = os.getenv("COUCHDB_INTERNAL_URL", "http://localhost:5984")
 COUCHDB_USER = os.getenv("COUCHDB_USER", "")
 COUCHDB_PASSWORD = os.getenv("COUCHDB_PASSWORD", "")
@@ -31,7 +27,6 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # Clerk configuration (for RS256 JWT validation)
 CLERK_ISSUER_URL = os.getenv("CLERK_ISSUER_URL", "").rstrip("/")
-ENABLE_CLERK_JWT = os.getenv("ENABLE_CLERK_JWT", "false").lower() == "true"
 CLERK_JWKS_URL = f"{CLERK_ISSUER_URL}/.well-known/jwks.json" if CLERK_ISSUER_URL else None
 
 # Tenant configuration
@@ -56,69 +51,10 @@ logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
 # Validation: Ensure required configuration is set
-if not ENABLE_CLERK_JWT and not JWT_SECRET:
-    raise ValueError("JWT_SECRET must be set when ENABLE_CLERK_JWT is false. Generate one with: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"")
-
-if ENABLE_CLERK_JWT and not CLERK_ISSUER_URL:
-    raise ValueError("CLERK_ISSUER_URL must be set when ENABLE_CLERK_JWT is true")
-
-# Load API keys
-def load_api_keys() -> Dict[str, str]:
-    """Load API keys from config file"""
-    config_path = Path(__file__).parent / "config" / "api_keys.json"
-    try:
-        with open(config_path, "r") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load API keys: {e}")
-        return {}
-
-API_KEYS = load_api_keys()
-
-# Models
-class TokenRequest(BaseModel):
-    api_key: str
-
-class TokenResponse(BaseModel):
-    token: str
-    token_type: str = "Bearer"
-    expires_in: int = 3600
+if not CLERK_ISSUER_URL:
+    raise ValueError("CLERK_ISSUER_URL must be set. Configure this in your .env file.")
 
 # JWT Functions
-def create_jwt_token(client_id: str, tenant_id: Optional[str] = None, expires_in: int = 3600) -> str:
-    """Create JWT token for a client"""
-    now = datetime.now(timezone.utc)
-    expiration = now + timedelta(seconds=expires_in)
-
-    payload = {
-        "sub": client_id,
-        "iat": int(now.timestamp()),
-        "exp": int(expiration.timestamp()),
-        "scope": ""
-    }
-
-    # Add tenant if provided
-    if tenant_id and ENABLE_TENANT_MODE:
-        payload[TENANT_CLAIM] = tenant_id
-
-    token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-    logger.info(f"Generated token for client: {client_id}" + (f" (tenant: {tenant_id})" if tenant_id else ""))
-    return token
-
-def verify_jwt_token(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Verify and decode JWT token. Returns (payload, error_reason)"""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        return payload, None
-    except jwt.ExpiredSignatureError as e:
-        return None, "token_expired"
-    except jwt.InvalidTokenError as e:
-        error_type = type(e).__name__
-        return None, f"invalid_token ({error_type})"
-    except Exception as e:
-        error_type = type(e).__name__
-        return None, f"token_error ({error_type})"
-
 def get_token_preview(token: str) -> str:
     """Get safe preview of token for logging (first and last 10 chars)"""
     if len(token) < 20:
@@ -157,9 +93,6 @@ def get_clerk_jwks_client() -> Optional[PyJWKClient]:
 
 def verify_clerk_jwt(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Verify Clerk JWT token (RS256). Returns (payload, error_reason)"""
-    if not ENABLE_CLERK_JWT:
-        return None, "clerk_jwt_not_enabled"
-
     try:
         # Get JWKS client
         jwks_client = get_clerk_jwks_client()
@@ -351,14 +284,9 @@ async def startup_event():
         logger.warning(f"⚠ No CouchDB credentials configured")
 
     # JWT configuration
-    if ENABLE_CLERK_JWT:
-        logger.info(f"✓ Clerk JWT validation ENABLED")
-        logger.info(f"  Clerk issuer: {CLERK_ISSUER_URL}")
-        logger.info(f"  JWKS URL: {CLERK_JWKS_URL}")
-        logger.info(f"  Fallback to custom JWT: enabled")
-    else:
-        logger.info(f"✓ Using custom JWT validation (HS256)")
-        logger.info(f"  Loaded {len(API_KEYS)} API keys")
+    logger.info(f"✓ Clerk JWT validation ENABLED")
+    logger.info(f"  Clerk issuer: {CLERK_ISSUER_URL}")
+    logger.info(f"  JWKS URL: {CLERK_JWKS_URL}")
 
     # Tenant mode
     if ENABLE_TENANT_MODE:
@@ -371,30 +299,6 @@ async def startup_event():
     logger.info(f"Logging level: {LOG_LEVEL}")
 
 # Routes
-@app.post("/auth/token", response_model=TokenResponse)
-async def get_token(request: TokenRequest):
-    """Generate JWT token from API key"""
-    api_key = request.api_key
-
-    if api_key not in API_KEYS:
-        logger.warning(f"Failed authentication attempt with invalid API key")
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    client_id = API_KEYS[api_key]
-
-    # Extract tenant if provided and tenant mode is enabled
-    tenant_id = None
-    if ENABLE_TENANT_MODE and hasattr(request, "tenant_id"):
-        tenant_id = request.tenant_id
-
-    token = create_jwt_token(client_id, tenant_id)
-
-    return TokenResponse(
-        token=token,
-        token_type="Bearer",
-        expires_in=3600
-    )
-
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "COPY", "PATCH"])
 async def proxy_couchdb(
     request: Request,
@@ -404,10 +308,6 @@ async def proxy_couchdb(
     """Proxy requests to CouchDB with JWT validation and tenant enforcement"""
 
     logger.debug(f"Incoming request: {request.method} /{path}")
-
-    # Skip auth for auth endpoints
-    if path.startswith("auth/"):
-        raise HTTPException(status_code=404, detail="Not found")
 
     # Extract and validate JWT token
     if not authorization:
@@ -420,22 +320,9 @@ async def proxy_couchdb(
         raise HTTPException(status_code=401, detail="Invalid authorization header format")
 
     token = authorization[7:]  # Remove "Bearer " prefix
-    payload = None
-    error_reason = None
 
-    # Try Clerk JWT first if enabled
-    if ENABLE_CLERK_JWT:
-        payload, error_reason = verify_clerk_jwt(token)
-        if payload:
-            logger.debug("Token verified as Clerk JWT")
-        else:
-            logger.debug(f"Clerk JWT validation failed: {error_reason}, trying custom JWT")
-
-    # Fall back to custom JWT if Clerk validation fails or not enabled
-    if not payload:
-        payload, error_reason = verify_jwt_token(token)
-        if payload:
-            logger.debug("Token verified as custom JWT")
+    # Verify Clerk JWT
+    payload, error_reason = verify_clerk_jwt(token)
 
     if not payload:
         # Decode token without verification to log what's in it
@@ -630,7 +517,6 @@ async def root():
         "name": "CouchDB JWT Proxy",
         "version": "1.0.0",
         "endpoints": {
-            "auth": "/auth/token",
             "health": "/health"
         }
     }

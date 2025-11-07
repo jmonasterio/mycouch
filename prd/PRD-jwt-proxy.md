@@ -85,7 +85,6 @@ curl -H "Authorization: Bearer <jwt_token>" http://localhost:5984/_all_dbs
 
 **Signing:**
 - Algorithm: HS256 (HMAC with SHA-256)
-- Secret: `JWT_SECRET` environment variable
 - No external key rotation in MVP
 
 ## Configuration
@@ -93,20 +92,8 @@ curl -H "Authorization: Bearer <jwt_token>" http://localhost:5984/_all_dbs
 ### Environment Variables
 
 ```bash
-JWT_SECRET=your-super-secret-key-change-this
 COUCHDB_INTERNAL_URL=http://localhost:5983
 PROXY_PORT=5984
-```
-
-### API Keys Configuration
-
-File: `config/api_keys.json`
-```json
-{
-  "api_key_1": "client-a",
-  "api_key_2": "client-b",
-  "test-key": "test-client"
-}
 ```
 
 ## Security Considerations

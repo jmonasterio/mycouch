@@ -51,22 +51,24 @@ function Dev {
 
 function Run {
     Write-Host "Starting CouchDB JWT Proxy..." -ForegroundColor Yellow
-    uv run python main.py
+    $env:PYTHONPATH = "src"
+    uv run python -m couchdb_jwt_proxy.main
 }
 
 function DevRun {
     Write-Host "Starting proxy with auto-reload..." -ForegroundColor Yellow
-    uv run uvicorn main:app --reload --port 5984
+    $env:PYTHONPATH = "src"
+    uv run uvicorn couchdb_jwt_proxy.main:app --reload --port 5985
 }
 
 function Test {
     Write-Host "Running tests..." -ForegroundColor Yellow
-    uv run pytest test_main.py -v
+    uv run pytest tests -v
 }
 
 function TestCov {
     Write-Host "Running tests with coverage..." -ForegroundColor Yellow
-    uv run pytest test_main.py -v --cov=main --cov-report=html --cov-report=term-missing
+    uv run pytest tests -v --cov=couchdb_jwt_proxy --cov-report=html --cov-report=term-missing
     Write-Host ""
     Write-Host "✓ Coverage report: htmlcov/index.html" -ForegroundColor Green
 }

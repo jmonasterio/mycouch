@@ -1,15 +1,14 @@
 # Clerk JWT Validation Setup
 
-This guide explains how to configure the proxy to validate **Clerk JWTs** instead of custom JWT tokens.
+This guide explains how to configure the proxy to validate **Clerk JWTs**.
 
 ## Why Clerk JWT?
 
 Using Clerk JWTs provides:
 - ✅ Enterprise authentication via Clerk
 - ✅ User management built-in
-- ✅ No need to manage JWT_SECRET
-- ✅ RS256 asymmetric signing (more secure)
-- ✅ Can still fall back to custom JWT if needed
+- ✅ No shared secrets to manage
+- ✅ RS256 asymmetric signing (public/private key cryptography)
 
 ## Prerequisites
 
@@ -30,10 +29,7 @@ From your Clerk dashboard:
 Edit `.env`:
 
 ```bash
-# Enable Clerk JWT validation
-ENABLE_CLERK_JWT=true
-
-# Your Clerk issuer URL
+# Your Clerk issuer URL (required)
 CLERK_ISSUER_URL=https://your-clerk-instance.clerk.accounts.dev
 ```
 
@@ -51,7 +47,6 @@ You should see in logs:
 ✓ Clerk JWT validation ENABLED
   Clerk issuer: https://your-clerk-instance.clerk.accounts.dev
   JWKS URL: https://your-clerk-instance.clerk.accounts.dev/.well-known/jwks.json
-  Fallback to custom JWT: enabled
 ```
 
 ## How It Works
@@ -64,25 +59,20 @@ You should see in logs:
 
 2. Proxy receives request
 
-3. Proxy tries to validate as Clerk JWT (RS256)
+3. Proxy validates Clerk JWT (RS256)
    - Fetches Clerk's public keys from JWKS endpoint
    - Validates signature using public key
    - Checks expiration, issuer, etc.
 
-4a. If Clerk JWT valid → Allow request ✓
-
-4b. If Clerk JWT invalid → Try custom JWT (HS256)
-   - Validates with JWT_SECRET
-   - If valid → Allow request ✓
-   - If invalid → Return 401 ✗
+4. If valid → Allow request ✓
+   If invalid → Return 401 ✗
 ```
 
 ### Key Points
 
 - **RS256 validation:** Clerk uses asymmetric signing (public/private keys)
 - **JWKS caching:** Public keys are cached to avoid hitting Clerk API on every request
-- **Fallback mode:** Can still accept custom JWTs for testing/migration
-- **No JWT_SECRET needed:** Can be ignored when using Clerk
+- **No shared secrets:** Uses public key cryptography
 
 ## Extracting User Info from Clerk JWT
 
@@ -173,9 +163,8 @@ echo $TOKEN | cut -d. -f2 | base64 -d | jq .
 **Cause:** Can't reach Clerk's JWKS endpoint
 
 **Solution:** Check:
-1. CLERK_ISSUER_URL is correct
+1. CLERK_ISSUER_URL is correct in `.env`
 2. Network connection to Clerk
-3. ENABLE_CLERK_JWT is true
 
 ```bash
 # Test manually
@@ -211,21 +200,6 @@ const newToken = await window.Clerk.session.getToken({forceRefresh: true});
 1. Verify CLERK_ISSUER_URL matches token issuer
 2. Get new token from Clerk
 
-### Falling Back to Custom JWT
-
-If Clerk JWT fails but custom JWT works:
-
-```
-DEBUG:main:Clerk JWT validation failed: ..., trying custom JWT
-✓ Authenticated (via custom JWT)
-```
-
-This is fine! The proxy is working as designed - falling back to custom JWT.
-
-To disable fallback (require Clerk only):
-- Remove JWT_SECRET from .env
-- Won't work, but logs will be clearer about what's failing
-
 ## Performance Notes
 
 - ✅ **JWKS cached:** Public keys fetched once, then cached
@@ -244,23 +218,11 @@ To disable fallback (require Clerk only):
 
 ## Production Checklist
 
-- [ ] ENABLE_CLERK_JWT=true
-- [ ] CLERK_ISSUER_URL set correctly
+- [ ] CLERK_ISSUER_URL set correctly in `.env`
 - [ ] HTTPS enabled for proxy
 - [ ] HTTPS enabled for Clerk (always)
 - [ ] Logs monitored for auth failures
-- [ ] Fallback JWT disabled if not needed
 - [ ] Test token refresh (after 1 hour)
-
-## Migration Path
-
-1. **Phase 1:** Enable ENABLE_CLERK_JWT=true with custom JWT fallback
-   - Accept both Clerk and custom JWTs
-   - Verify Clerk works without breaking existing clients
-
-2. **Phase 2:** Remove JWT_SECRET from production
-   - Forces Clerk JWT only
-   - Commits to Clerk auth
 
 ## More Information
 

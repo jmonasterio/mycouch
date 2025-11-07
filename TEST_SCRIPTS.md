@@ -176,10 +176,6 @@ curl -X POST \
 - Proxy is not running
 - Fix: Run `uv run uvicorn main:app --reload --port 5985`
 
-### "Invalid API key" response
-- API key "test-key" is not in `config/api_keys.json`
-- Fix: Check `config/api_keys.json` and add "test-key" if needed
-
 ### JWT token expiration
 - Tokens expire after 1 hour
 - Fix: Get a new token with the same API key

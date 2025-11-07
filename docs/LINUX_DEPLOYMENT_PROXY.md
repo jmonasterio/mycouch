@@ -107,11 +107,7 @@ nano .env
 
 ```bash
 # Enable Clerk JWT validation (set to true if using Clerk)
-ENABLE_CLERK_JWT=true
 CLERK_ISSUER_URL=https://your-clerk-instance.clerk.accounts.dev
-
-# Custom JWT secret (if not using Clerk)
-JWT_SECRET=<generate-a-strong-random-secret>
 
 # Generate a random JWT secret:
 # python3 -c "import secrets; print(secrets.token_urlsafe(32))"
@@ -544,7 +540,6 @@ sudo systemctl start couchdb-proxy
 - [ ] Python 3.9+ installed
 - [ ] Dependencies installed (`uv sync` or `pip install`)
 - [ ] `.env` configured with production values
-- [ ] `JWT_SECRET` set to secure random value (or Clerk enabled)
 - [ ] `COUCHDB_INTERNAL_URL` points to internal CouchDB
 - [ ] `COUCHDB_USER` and `COUCHDB_PASSWORD` set correctly
 - [ ] Firewall allows port 5985 (or 443 if using Nginx)

@@ -27,12 +27,15 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-v --cov=src.couchdb_jwt_proxy --cov-report=html --cov-report=term-missing"
+addopts = "-v"
+pythonpath = ["src"]
+
+[tool.pytest_asyncio]
+asyncio_mode = "auto"
 
 [tool.coverage.run]
-source = ["src/couchdb_jwt_proxy"]
+source = ["couchdb_jwt_proxy"]
 branch = true
 
 [tool.coverage.report]

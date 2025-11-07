@@ -31,7 +31,6 @@ Requests filtered/restricted to that tenant's data
 - Proxy receives request with JWT token
 - Proxy validates the JWT signature:
   - If using Clerk: Validates RS256 using Clerk's public keys
-  - If using custom JWT: Validates HS256 using JWT_SECRET
 - If validation fails: Request rejected with 401
 
 #### 3. Tenant Extraction
@@ -159,7 +158,7 @@ payload = {
     "tenant_id": "band-1"  # ← Include tenant
 }
 
-token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+token = jwt.encode(payload, TBD, algorithm="HS256")
 ```
 
 ---
@@ -406,7 +405,6 @@ Current limitations that could be enhanced:
 
 ### Best Practices
 
-1. **Keep JWT_SECRET secure** - Use strong random value
 2. **Use HTTPS** - Prevent token interception
 3. **Keep tokens short-lived** - Reduce exposure window
 4. **Validate tenant on server** - Don't trust client claims

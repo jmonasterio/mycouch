@@ -153,23 +153,6 @@ curl -X POST http://localhost:5985/auth/token \
   -d '{"api_key": "test-key"}'
 ```
 
-### Issue: "invalid_token (DecodeError)"
-
-**Problem:**
-```
-401 - invalid_token (DecodeError) | Token: eyJhbGc...zZ0Ig
-```
-
-**Causes:**
-1. Token was modified
-2. Wrong JWT_SECRET used to validate
-3. Token format is corrupted
-
-**Solution:**
-1. Check that `JWT_SECRET` in `.env` matches token creation
-2. Get a new token from `/auth/token` endpoint
-3. Don't modify token after receiving it
-
 ### Issue: "token_too_short"
 
 **Problem:**
@@ -279,7 +262,6 @@ echo "Token expires in: $((EXPIRY - NOW)) seconds"
 - [ ] Is Authorization header being sent? (check logs: "Missing Authorization header")
 - [ ] Is it Bearer token format? (check logs: "Invalid auth header format")
 - [ ] Is token expired? (check logs: "token_expired", check exp time)
-- [ ] Is JWT_SECRET correct? (check logs: "DecodeError")
 - [ ] Is token complete? (not truncated or modified)
 - [ ] Check client IP in logs - is it expected?
 - [ ] Check path in logs - is endpoint allowed?

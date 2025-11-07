@@ -51,7 +51,6 @@ verify_file_exists() {
 }
 
 echo "1️⃣  Checking for hardcoded secrets in Python files..."
-check_file "main.py" "JWT_SECRET = \"" "No hardcoded JWT_SECRET in main.py"
 check_file "main.py" "password.*=" "No hardcoded passwords in main.py" || WARNINGS=$((WARNINGS + 1))
 check_file "main.py" "api_key.*=" "No hardcoded API keys in main.py" || WARNINGS=$((WARNINGS + 1))
 echo ""
@@ -64,14 +63,6 @@ else
     echo -e "${GREEN}✅ PASS${NC}: .env file is NOT tracked in git"
 fi
 
-if git ls-files | grep -q "config/api_keys.json$"; then
-    echo -e "${RED}❌ FAIL${NC}: config/api_keys.json is tracked in git (should be in .gitignore)"
-    ERRORS=$((ERRORS + 1))
-else
-    echo -e "${GREEN}✅ PASS${NC}: config/api_keys.json is NOT tracked in git"
-fi
-echo ""
-
 echo "3️⃣  Checking .gitignore configuration..."
 if grep -q "\.env$" .gitignore 2>/dev/null; then
     echo -e "${GREEN}✅ PASS${NC}: .env is in .gitignore"
@@ -79,19 +70,6 @@ else
     echo -e "${RED}❌ FAIL${NC}: .env is NOT in .gitignore"
     ERRORS=$((ERRORS + 1))
 fi
-
-if grep -q "config/api_keys.json" .gitignore 2>/dev/null; then
-    echo -e "${GREEN}✅ PASS${NC}: config/api_keys.json is in .gitignore"
-else
-    echo -e "${RED}❌ FAIL${NC}: config/api_keys.json is NOT in .gitignore"
-    ERRORS=$((ERRORS + 1))
-fi
-echo ""
-
-echo "4️⃣  Checking template files..."
-verify_file_exists ".env.example" ".env.example exists"
-verify_file_exists "config/api_keys.json.example" "config/api_keys.json.example exists"
-echo ""
 
 echo "5️⃣  Checking that templates don't contain real secrets..."
 if grep -q "admin$" .env.example; then
