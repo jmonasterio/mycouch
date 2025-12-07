@@ -233,48 +233,46 @@ class TestClerkService:
         """Test successful active tenant update"""
         service, mock_client = clerk_service_with_client
 
-        # Mock getting current metadata
-        mock_session = MagicMock()
-        mock_session.public_user_data = MagicMock()
-        mock_session.public_user_data.get.return_value = {"existing": "metadata"}
-        mock_client.sessions.get.return_value = mock_session
+        # Mock get_user_session_metadata to return existing metadata
+        with patch.object(service, 'get_user_session_metadata', new_callable=AsyncMock) as mock_get_meta:
+            mock_get_meta.return_value = {"existing": "metadata"}
+            
+            # Mock sessions.update to succeed
+            mock_client.sessions.update = MagicMock()
 
-        result = await service.update_active_tenant_in_session("user_123", "session_123", "tenant_456")
+            result = await service.update_active_tenant_in_session("user_123", "session_123", "tenant_456")
 
-        assert result is True
-        mock_client.sessions.update.assert_called_once()
-        call_args = mock_client.sessions.update.call_args
-        assert call_args[1]["session_id"] == "session_123"
-        assert "metadata" in call_args[1]["public_user_data"]
-        assert call_args[1]["public_user_data"]["metadata"]["active_tenant_id"] == "tenant_456"
+            assert result is True
+            mock_client.sessions.update.assert_called_once()
+            call_args = mock_client.sessions.update.call_args
+            assert call_args[1]["session_id"] == "session_123"
+            assert "active_tenant_id" in call_args[1]["public_metadata"]
+            assert call_args[1]["public_metadata"]["active_tenant_id"] == "tenant_456"
 
     @pytest.mark.asyncio
     async def test_update_active_tenant_in_session_fallback(self, clerk_service_with_client):
         """Test active tenant update with fallback to user metadata"""
         service, mock_client = clerk_service_with_client
 
-        # Mock session metadata update failure
-        mock_client.sessions.update.side_effect = Exception("Session update failed")
+        # Mock get_user_session_metadata to return existing metadata
+        with patch.object(service, 'get_user_session_metadata', new_callable=AsyncMock) as mock_get_meta:
+            mock_get_meta.return_value = {}
+            
+            # Mock session metadata update failure
+            mock_client.sessions.update = MagicMock(side_effect=Exception("Session update failed"))
+            
+            # Mock user metadata update success
+            mock_client.users.update = MagicMock()
 
-        # Mock getting current metadata
-        mock_session = MagicMock()
-        mock_session.public_user_data = MagicMock()
-        mock_session.public_user_data.get.return_value = {}
-        mock_client.sessions.get.return_value = mock_session
+            result = await service.update_active_tenant_in_session("user_123", "session_123", "tenant_456")
 
-        # Mock user metadata update success
-        mock_user = MagicMock()
-        mock_user.public_metadata = {}
-        mock_client.users.get.return_value = mock_user
-
-        result = await service.update_active_tenant_in_session("user_123", "session_123", "tenant_456")
-
-        assert result is True
-        mock_client.users.update.assert_called_once()
-        call_args = mock_client.users.update.call_args
-        assert call_args[1]["user_id"] == "user_123"
-        assert "active_tenant_id" in call_args[1]["public_metadata"]
-        assert call_args[1]["public_metadata"]["active_tenant_id"] == "tenant_456"
+            assert result is True
+            # Should fall back to users.update when sessions.update fails
+            mock_client.users.update.assert_called_once()
+            call_args = mock_client.users.update.call_args
+            assert call_args[1]["user_id"] == "user_123"
+            assert "active_tenant_id" in call_args[1]["public_metadata"]
+            assert call_args[1]["public_metadata"]["active_tenant_id"] == "tenant_456"
 
     @pytest.mark.asyncio
     async def test_update_active_tenant_in_session_failure(self, clerk_service_with_client):

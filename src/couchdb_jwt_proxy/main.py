@@ -413,8 +413,10 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
             raise
 
     # For roady, strictly get active tenant from JWT claims
+    # CRITICAL SECURITY FIX: Remove fallback mechanism entirely
     logger.debug(f"Roady request - checking for active tenant in JWT for sub '{sub}'")
 
+    # Check for active_tenant_id claim in JWT
     active_tenant_id = payload.get("active_tenant_id") or payload.get("tenant_id")
     
     # Check metadata inside JWT if not at top level (Clerk sometimes puts it there)
@@ -422,13 +424,16 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
         active_tenant_id = payload.get("metadata").get("active_tenant_id")
         
     if active_tenant_id:
-         logger.debug(f"Found active tenant in JWT claims: {active_tenant_id}")
-    else:
-         # STRICT ENFORCEMENT: No fallback to backend API or personal tenant
-         logger.warning(f"Missing active_tenant_id in JWT for roady request - rejecting request")
-         raise HTTPException(status_code=401, detail="Missing active_tenant_id claim in JWT. Please refresh your token.")
-
-    return active_tenant_id
+        logger.debug(f"Found active tenant in JWT claims: {active_tenant_id}")
+        return active_tenant_id
+    
+    # STRICT ENFORCEMENT: No fallback to backend API or personal tenant
+    # Reject request immediately if active_tenant_id claim is missing
+    logger.warning(f"Missing active_tenant_id in JWT for roady request from sub '{sub}' - rejecting request")
+    raise HTTPException(
+        status_code=401, 
+        detail="Missing active_tenant_id claim in JWT. Please refresh your token and try again."
+    )
 
 def is_system_doc(doc_id: str) -> bool:
     """Check if document ID is a system document"""

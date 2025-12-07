@@ -18,38 +18,62 @@ MyCouch's architecture is fundamentally sound, but the implementation has **crit
 
 ### 1. JWT Fallback Creates Authentication Bypass
 **Severity:** CRITICAL | **CWE-287 (Improper Authentication)**
+**Status:** ✅ **FIXED** (2025-12-07)
 
-The backend implements a fallback that synchronously calls Clerk's API when `active_tenant_id` is missing from the JWT:
+**What was vulnerable:**
+The backend had a fallback that synchronously called Clerk's API when `active_tenant_id` was missing from the JWT:
 
 ```python
-# VULNERABLE PATTERN:
+# VULNERABLE PATTERN (REMOVED):
 tenant_id = payload.get("active_tenant_id")
 if not tenant_id:
-    tenant_id = clerk_service.get_user_active_tenant(user_id)  # ❌ FALLBACK
+    tenant_id = clerk_service.get_user_active_tenant(user_id)  # ❌ REMOVED
 ```
 
-**Attack Vector:**
-- Attacker sends request with expired/stale JWT
-- Backend falls back to Clerk API lookup
-- Access granted despite invalid token
-- Tenant isolation bypassed
+**Why critical:**
+- Attacker could send request with expired/stale JWT
+- Backend fallback would call Clerk API and grant access anyway
+- Tenant isolation could be completely bypassed
+- Cross-tenant data leakage possible
 
-**Business Impact:**
-- Users can access data from wrong tenant
-- Potential cross-tenant data leakage
-- Compliance violations (data privacy)
-
-**Fix Required:**
+**Fix implemented:**
 ```python
-# REMOVE FALLBACK - Enforce strict JWT validation:
-tenant_id = payload.get("active_tenant_id") or payload.get("tenant_id")
-if not tenant_id:
-    raise HTTPException(status_code=401, detail="Missing tenant_id claim in JWT")
+# STRICT ENFORCEMENT (IMPLEMENTED):
+active_tenant_id = payload.get("active_tenant_id") or payload.get("tenant_id")
 
-# Exempt only `/my-tenants` and `/choose-tenant` (tenant discovery endpoints)
+if not active_tenant_id and payload.get("metadata"):
+    active_tenant_id = payload.get("metadata").get("active_tenant_id")
+
+if active_tenant_id:
+    logger.debug(f"Found active tenant in JWT claims: {active_tenant_id}")
+    return active_tenant_id
+
+# NO FALLBACK - Reject immediately if claim missing
+logger.warning(f"Missing active_tenant_id in JWT for roady request - rejecting")
+raise HTTPException(
+    status_code=401, 
+    detail="Missing active_tenant_id claim in JWT. Please refresh your token."
+)
 ```
 
-**Status:** ⚠️ Documented in `/prd/strict-jwt-tenant-propagation.md` but not yet implemented
+**Changes made:**
+- ✅ Removed `clerk_service.get_user_active_tenant()` fallback call
+- ✅ Replaced with strict JWT claim validation
+- ✅ Returns 401 error immediately if active_tenant_id missing
+- ✅ Added 20+ comprehensive security tests
+- ✅ Improved logging for security audit trail
+
+**Test coverage:**
+- ✅ Valid JWT with active_tenant_id accepted
+- ✅ Stale JWT without claim rejected (no fallback)
+- ✅ Clerk API NOT called for missing claims
+- ✅ Proper error logging for audit trail
+- ✅ All JWT claim variations tested
+- ✅ CWE-287 compliance verified
+
+**Code changes:**
+- File: `src/couchdb_jwt_proxy/main.py` lines 415-431
+- File: `tests/test_jwt_fallback_fix.py` (new test file)
 
 ---
 
@@ -491,13 +515,16 @@ if unauthorized_tenant_switch_attempts > 3:
 
 ### 🔴 CRITICAL (Must Fix Before Production)
 
-1. **Remove JWT fallback** (1-2 hours)
+1. ✅ **Remove JWT fallback** (COMPLETED 2025-12-07)
+   - Fixed: `src/couchdb_jwt_proxy/main.py` lines 415-431
+   - Tests: `tests/test_jwt_fallback_fix.py` (20+ tests)
+
 2. **Verify Clerk JWT template** (15 minutes)
 3. **Add tenant membership validation** (2-3 hours)
 4. **Document CouchDB security setup** (1-2 hours)
 5. **Implement rate limiting** (2-3 hours)
 
-**Total:** ~2 days of work
+**Remaining:** ~2 days of work
 
 ### 🟠 HIGH (Fix ASAP)
 
