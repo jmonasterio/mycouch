@@ -17,6 +17,7 @@ dependencies = [
     "httpx",
     "python-dotenv",
     "pydantic",
+    "clerk-backend-api",  # Clerk Backend API for session management
 ]
 
 [project.optional-dependencies]

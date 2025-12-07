@@ -7,6 +7,8 @@ export COUCHDB_Cors_Methods="GET, PUT, POST, HEAD, DELETE"
 export COUCHDB_Cors_Headers="accept, authorization, content-type, origin, referer, x-csrf-token"
 
 # Start local CouchDB container for development
+# RUN IN PARTY MODE!
+docker rm couchdb
 docker run -d --name couchdb -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=admin -p 5984:5984 couchdb:3
 
 echo "CouchDB container started"

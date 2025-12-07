@@ -7,7 +7,20 @@
       "WebFetch(domain:code.claude.com)",
       "Bash(git -C /c/github/mycouch status)",
       "Bash(py -m py_compile:*)",
-      "Bash(uv sync:*)"
+      "Bash(uv sync:*)",
+      "Bash(git -C \"\\github\\couch-sitter\" status)",
+      "Bash(powershell -Command \"\n$file = ''C:\\github\\couch-sitter\\index.html''\n$content = Get-Content $file -Raw\n\n# Remove the entire tenant selection dialog\n$content = $content -replace ''(?s)\\s*<!-- Tenant Selection Dialog -->.*?</dialog>\\s*'', ''''\n\n# Remove x-show attributes from nav and main\n$content = $content -replace ''x-show=\"\"!showTenantSelection\"\"'', ''''\n\nSet-Content -Path $file -Value $content -Encoding UTF8\nWrite-Host ''Done''\n\")",
+      "Bash(python:*)",
+      "Bash(chmod:*)",
+      "Bash(curl:*)",
+      "Bash(uv run pytest:*)",
+      "Bash(uv run:*)",
+      "Bash(find:*)",
+      "Bash(paste:*)",
+      "Bash(bc:*)",
+      "Bash(bash:*)",
+      "Bash(findstr:*)",
+      "Bash(powershell:*)"
     ],
     "additionalDirectories": [
       "c:\\github\\roady"

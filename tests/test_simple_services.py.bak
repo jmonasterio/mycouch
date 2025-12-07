@@ -1,0 +1,353 @@
+"""
+Simple Service tests to validate basic functionality.
+"""
+
+import pytest
+import time
+import threading
+import hashlib
+from unittest.mock import patch, MagicMock, AsyncMock
+from datetime import datetime, timedelta
+import asyncio
+
+# Import service modules
+from couchdb_jwt_proxy.clerk_service import ClerkService
+from couchdb_jwt_proxy.couch_sitter_service import CouchSitterService
+from couchdb_jwt_proxy.user_tenant_cache import UserTenantInfo, UserTenantCache
+from couchdb_jwt_proxy.dal import create_dal
+
+
+class TestSimpleClerkService:
+    """Simple tests for ClerkService"""
+
+    def test_service_initialization(self):
+        """Test basic ClerkService initialization"""
+        with patch('couchdb_jwt_proxy.clerk_service.os.getenv') as mock_getenv, \
+             patch('couchdb_jwt_proxy.clerk_service.CLERK_API_AVAILABLE', False):
+
+            mock_getenv.return_value = "https://test.clerk.dev"
+            service = ClerkService()
+
+            assert service.issuer_url == "https://test.clerk.dev"
+            assert service.clerk_client is None
+            assert service.is_configured() is False
+
+    def test_service_without_issuer_url(self):
+        """Test service initialization without issuer URL"""
+        with patch('couchdb_jwt_proxy.clerk_service.os.getenv', return_value=None):
+            with pytest.raises(ValueError, match="CLERK_ISSUER_URL is required"):
+                ClerkService()
+
+    def test_jwt_extraction_without_jose(self):
+        """Test JWT extraction when PyJWT is not available"""
+        with patch('couchdb_jwt_proxy.clerk_service.os.getenv') as mock_getenv, \
+             patch('couchdb_jwt_proxy.clerk_service.CLERK_API_AVAILABLE', False):
+
+            mock_getenv.return_value = "https://test.clerk.dev"
+            service = ClerkService()
+
+            # Should handle gracefully when jwt module is not available
+            result = asyncio.run(service.get_user_from_jwt("invalid_token"))
+            assert result is None
+
+
+class TestSimpleCouchSitterService:
+    """Simple tests for CouchSitterService"""
+
+    def test_service_initialization(self):
+        """Test basic CouchSitterService initialization"""
+        service = CouchSitterService(
+            couch_sitter_db_url="http://localhost:5984/test-db"
+        )
+
+        assert service.db_url == "http://localhost:5984/test-db"
+        assert service.couchdb_user is None
+        assert service.couchdb_password is None
+
+    def test_service_initialization_with_auth(self):
+        """Test CouchSitterService initialization with auth"""
+        service = CouchSitterService(
+            couch_sitter_db_url="http://localhost:5984/test-db",
+            couchdb_user="admin",
+            couchdb_password="password"
+        )
+
+        assert service.db_url == "http://localhost:5984/test-db"
+        assert service.couchdb_user == "admin"
+        assert service.couchdb_password == "password"
+        assert "Authorization" in service.auth_headers
+
+    def test_hash_sub_function(self):
+        """Test SHA256 hashing functionality"""
+        service = CouchSitterService("http://localhost:5984/test")
+
+        sub = "test_user_123"
+        hash_result = service._hash_sub(sub)
+
+        # Should be SHA256 hash (64 hex characters)
+        assert len(hash_result) == 64
+        assert hash_result != sub
+        assert hash_result == hashlib.sha256(sub.encode()).hexdigest()
+
+        # Should be consistent
+        hash_result2 = service._hash_sub(sub)
+        assert hash_result == hash_result2
+
+        # Different inputs should produce different hashes
+        different_hash = service._hash_sub("different_input")
+        assert hash_result != different_hash
+
+    def test_get_user_tenant_info_missing_sub(self):
+        """Test get_user_tenant_info with missing sub"""
+        service = CouchSitterService("http://localhost:5984/test")
+
+        with pytest.raises(ValueError, match="Sub claim is required"):
+            import asyncio
+            asyncio.run(service.get_user_tenant_info(""))
+
+
+class TestSimpleUserTenantCache:
+    """Simple tests for UserTenantCache"""
+
+    def test_cache_initialization(self):
+        """Test basic cache initialization"""
+        cache = UserTenantCache(ttl_seconds=600)
+
+        assert cache.ttl_seconds == 600
+        assert len(cache._cache) == 0
+        assert isinstance(cache._lock, type(threading.RLock()))
+
+    def test_cache_default_ttl(self):
+        """Test cache with default TTL"""
+        cache = UserTenantCache()
+
+        assert cache.ttl_seconds == 300
+
+    def test_user_tenant_info_creation(self):
+        """Test UserTenantInfo creation"""
+        info = UserTenantInfo(
+            user_id="user_123",
+            tenant_id="tenant_456",
+            sub="sub_789"
+        )
+
+        assert info.user_id == "user_123"
+        assert info.tenant_id == "tenant_456"
+        assert info.sub == "sub_789"
+        assert info.email is None
+        assert info.name is None
+        assert info.is_personal_tenant is True
+        assert info.cached_at is not None
+
+    def test_cache_set_and_get(self):
+        """Test basic cache set and get operations"""
+        cache = UserTenantCache()
+
+        user_info = UserTenantInfo(
+            user_id="user_test",
+            tenant_id="tenant_test",
+            sub="sub_test"
+        )
+
+        # Set user
+        cache.set_user("test_hash", user_info)
+
+        # Get user
+        cached_info = cache.get_user_by_sub_hash("test_hash")
+
+        assert cached_info is not None
+        assert cached_info.user_id == "user_test"
+        assert cached_info.tenant_id == "tenant_test"
+        assert cached_info.sub == "sub_test"
+
+    def test_cache_get_nonexistent(self):
+        """Test getting non-existent user"""
+        cache = UserTenantCache()
+
+        cached_info = cache.get_user_by_sub_hash("nonexistent_hash")
+        assert cached_info is None
+
+    def test_cache_invalidate(self):
+        """Test cache invalidation"""
+        cache = UserTenantCache()
+
+        user_info = UserTenantInfo(
+            user_id="user_test",
+            tenant_id="tenant_test",
+            sub="sub_test"
+        )
+
+        # Set user
+        cache.set_user("test_hash", user_info)
+        assert cache.get_user_by_sub_hash("test_hash") is not None
+
+        # Invalidate user
+        result = cache.invalidate("test_hash")
+        assert result is True
+        assert cache.get_user_by_sub_hash("test_hash") is None
+
+    def test_cache_invalidate_nonexistent(self):
+        """Test invalidating non-existent user"""
+        cache = UserTenantCache()
+
+        result = cache.invalidate("nonexistent_hash")
+        assert result is False
+
+    def test_cache_clear_all(self):
+        """Test clearing all cache entries"""
+        cache = UserTenantCache()
+
+        # Add multiple users
+        for i in range(5):
+            user_info = UserTenantInfo(
+                user_id=f"user_{i}",
+                tenant_id=f"tenant_{i}",
+                sub=f"sub_{i}"
+            )
+            cache.set_user(f"hash_{i}", user_info)
+
+        # Verify entries exist
+        assert len(cache._cache) == 5
+
+        # Clear all
+        removed_count = cache.clear_all()
+
+        assert removed_count == 5
+        assert len(cache._cache) == 0
+
+    def test_cache_expiration(self):
+        """Test cache expiration functionality"""
+        cache = UserTenantCache(ttl_seconds=1)  # 1 second TTL
+
+        user_info = UserTenantInfo(
+            user_id="user_test",
+            tenant_id="tenant_test",
+            sub="sub_test"
+        )
+
+        # Set user with old timestamp by directly manipulating cache
+        user_info.cached_at = time.time() - 2  # 2 seconds ago (expired)
+        cache._cache["test_hash"] = user_info
+
+        # Should be expired now
+        cached_info = cache.get_user_by_sub_hash("test_hash")
+        assert cached_info is None
+
+    def test_cache_stats(self):
+        """Test cache statistics"""
+        cache = UserTenantCache()
+
+        # Add some entries
+        for i in range(3):
+            user_info = UserTenantInfo(
+                user_id=f"user_{i}",
+                tenant_id=f"tenant_{i}",
+                sub=f"sub_{i}"
+            )
+            cache.set_user(f"hash_{i}", user_info)
+
+        stats = cache.get_stats()
+
+        assert stats["total_entries"] == 3
+        assert stats["valid_entries"] == 3
+        assert stats["expired_entries"] == 0
+        assert stats["ttl_seconds"] == 300
+        assert "memory_usage_kb" in stats
+
+
+class TestSimpleMemoryDalIntegration:
+    """Test Memory DAL integration with services"""
+
+    def test_memory_dal_basic_operations(self):
+        """Test Memory DAL basic functionality"""
+        dal = create_dal(backend="memory")
+
+        # Test basic CRUD operations
+        doc = {
+            "_id": "test_doc_1",
+            "type": "test",
+            "data": "test data"
+        }
+
+        # Create document
+        result = dal.get("/test_doc_1", "PUT", doc)
+        assert result["ok"] is True
+        assert result["id"] == "test_doc_1"
+
+        # Read document
+        result = dal.get("/test_doc_1", "GET")
+        assert result["_id"] == "test_doc_1"
+        assert result["type"] == "test"
+        assert result["data"] == "test data"
+
+        # Update document
+        updated_doc = result.copy()
+        updated_doc["data"] = "updated data"
+        result = dal.get("/test_doc_1", "PUT", updated_doc)
+        assert result["ok"] is True
+
+        # Verify update
+        result = dal.get("/test_doc_1", "GET")
+        assert result["data"] == "updated data"
+
+        # Delete document
+        result = dal.get("/test_doc_1", "DELETE")
+        assert result["ok"] is True
+
+        # Verify deletion
+        result = dal.get("/test_doc_1", "GET")
+        assert result["error"] == "not_found"
+
+    def test_memory_dal_find_operations(self):
+        """Test Memory DAL find operations"""
+        dal = create_dal(backend="memory")
+
+        # Create test documents
+        docs = [
+            {"_id": "user_1", "type": "user", "name": "User 1"},
+            {"_id": "user_2", "type": "user", "name": "User 2"},
+            {"_id": "task_1", "type": "task", "name": "Task 1"}
+        ]
+
+        for doc in docs:
+            dal.get(f"/{doc['_id']}", "PUT", doc)
+
+        # Find all users
+        result = dal.get("/_find", "POST", {
+            "selector": {"type": "user"}
+        })
+
+        assert len(result["docs"]) == 2
+        user_names = [doc["name"] for doc in result["docs"]]
+        assert "User 1" in user_names
+        assert "User 2" in user_names
+
+    def test_memory_dal_bulk_operations(self):
+        """Test Memory DAL bulk operations"""
+        dal = create_dal(backend="memory")
+
+        # Bulk create documents
+        docs = [
+            {"_id": "bulk_1", "type": "test", "name": "Test 1"},
+            {"_id": "bulk_2", "type": "test", "name": "Test 2"},
+            {"_id": "bulk_3", "type": "test", "name": "Test 3"}
+        ]
+
+        result = dal.get("/_bulk_docs", "POST", {"docs": docs})
+        assert len(result) == 3
+
+        for i, doc_result in enumerate(result):
+            assert doc_result["ok"] is True
+
+        # Verify all documents exist
+        result = dal.get("/_all_docs", "GET")
+        assert result["total_rows"] == 3
+
+        doc_ids = [row["id"] for row in result["rows"]]
+        assert "bulk_1" in doc_ids
+        assert "bulk_2" in doc_ids
+        assert "bulk_3" in doc_ids
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

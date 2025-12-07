@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../roady"
+		},
+		{
+			"path": "../couch-sitter"
+		}
+	],
+	"settings": {}
+}

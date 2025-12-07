@@ -17,10 +17,10 @@ CouchDB doesn't have built-in JWT support. We need a proxy that:
 ```
 Client
   ↓
-Proxy (port 5984)
+Proxy (port 5985)
 ├── POST /auth/token          → Generate JWT from API key
 ├── GET/POST/PUT/DELETE /* → Validate JWT → Forward to CouchDB (5983)
-└── CouchDB (port 5983)
+└── CouchDB (port 5984)
 ```
 
 ## API Specification
@@ -67,8 +67,8 @@ curl -H "Authorization: Bearer <jwt_token>" http://localhost:5984/_all_dbs
 
 **Behavior:**
 - Validates JWT token from Authorization header
-- Forwards request to internal CouchDB at `http://localhost:5983/<path>`
-- Returns CouchDB response directly to client
+- Modify & Forwards request to internal CouchDB at `http://localhost:5983/<path>`
+- Modify & Returns CouchDB response directly to client
 - Returns 401 if no token or invalid token
 
 ## JWT Token Structure
@@ -92,8 +92,8 @@ curl -H "Authorization: Bearer <jwt_token>" http://localhost:5984/_all_dbs
 ### Environment Variables
 
 ```bash
-COUCHDB_INTERNAL_URL=http://localhost:5983
-PROXY_PORT=5984
+COUCHDB_INTERNAL_URL=http://localhost:5984
+PROXY_PORT=5985
 ```
 
 ## Security Considerations

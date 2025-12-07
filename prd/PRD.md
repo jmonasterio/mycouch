@@ -55,7 +55,7 @@ Teams need a platform to:
                                 ↓
                     ┌─────────────────────────┐
                     │  JWT Proxy (FastAPI)    │
-                    │  Port 5984              │
+                    │  Port 5985              │
                     │  - /auth/token          │
                     │  - /* (with JWT check)  │
                     └────────────┬────────────┘
@@ -63,7 +63,7 @@ Teams need a platform to:
                                  ↓
                     ┌─────────────────────────┐
                     │  CouchDB (Internal)     │
-                    │  Port 5983              │
+                    │  Port 5984             │
                     │  - admin (MyCouch)      │
                     │  - roady (apps)         │
                     │  - user-data (apps)     │
@@ -88,7 +88,9 @@ Teams need a platform to:
 
 ## Database Schema
 
-### Admin Database (`/admin`)
+### Admin Database (`/couch-sitter`)
+
+The `couch-sitter` database stores admin data including workspaces, users, API keys, and audit logs.
 
 Document type: Workspace (tenant)
 ```javascript

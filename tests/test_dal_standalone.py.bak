@@ -1,0 +1,767 @@
+"""
+Comprehensive tests for CouchDB DAL with Memory Fallback.
+
+Tests cover:
+- MemoryBackend functionality for all supported endpoints
+- Backend auto-detection logic
+- CouchDAL main class behavior
+- Integration scenarios
+- Error handling and edge cases
+"""
+
+import pytest
+import os
+import json
+from unittest.mock import patch, MagicMock
+from src.couchdb_jwt_proxy.dal import (
+    MemoryBackend, CouchBackend, CouchDAL, create_dal, _is_test_env
+)
+
+
+class TestMemoryBackend:
+    """Test the MemoryBackend implementation."""
+
+    def setup_method(self):
+        """Set up a fresh MemoryBackend for each test."""
+        self.backend = MemoryBackend()
+
+    def test_database_info(self):
+        """Test root endpoint returns database metadata."""
+        response = self.backend.handle_request("/", "GET")
+
+        assert response["db_name"] == "memory_db"
+        assert response["doc_count"] == 0
+        assert response["doc_del_count"] == 0
+        assert response["update_seq"] == 0
+
+    def test_local_document_operations(self):
+        """Test _local document CRUD operations."""
+        doc_id = "test_checkpoint"
+        doc_data = {"seq": 42, "processed": ["a", "b"]}
+
+        # Should not exist initially
+        response = self.backend.handle_request(f"/_local/{doc_id}", "GET")
+        assert response["error"] == "not_found"
+
+        # Create document
+        response = self.backend.handle_request(f"/_local/{doc_id}", "PUT", doc_data)
+        assert response["ok"] is True
+        assert response["id"] == f"_local/{doc_id}"
+
+        # Retrieve document
+        response = self.backend.handle_request(f"/_local/{doc_id}", "GET")
+        assert response == doc_data
+
+        # Delete document
+        response = self.backend.handle_request(f"/_local/{doc_id}", "DELETE")
+        assert response["ok"] is True
+
+        # Should be gone
+        response = self.backend.handle_request(f"/_local/{doc_id}", "GET")
+        assert response["error"] == "not_found"
+
+    def test_regular_document_operations(self):
+        """Test regular document CRUD operations."""
+        doc_id = "test_doc"
+        doc_data = {"_id": doc_id, "type": "task", "title": "Test task"}
+
+        # Should not exist initially
+        response = self.backend.handle_request(f"/{doc_id}", "GET")
+        assert response["error"] == "not_found"
+
+        # Create document
+        response = self.backend.handle_request(f"/{doc_id}", "PUT", doc_data)
+        assert response["ok"] is True
+        assert response["id"] == doc_id
+        assert "_rev" in response
+
+        # Retrieve document
+        response = self.backend.handle_request(f"/{doc_id}", "GET")
+        assert response["type"] == "task"
+        assert response["title"] == "Test task"
+        assert "_rev" in response
+
+        # Delete document
+        response = self.backend.handle_request(f"/{doc_id}", "DELETE")
+        assert response["ok"] is True
+
+        # Should be gone
+        response = self.backend.handle_request(f"/{doc_id}", "GET")
+        assert response["error"] == "not_found"
+
+    def test_put_without_id_generates_id(self):
+        """Test PUT without _id generates a UUID."""
+        doc_data = {"type": "task", "title": "Auto-generated ID"}
+
+        response = self.backend.handle_request("/new_doc", "PUT", doc_data)
+        assert response["ok"] is True
+        assert response["id"] == "new_doc"
+        assert "_rev" in response
+
+    def test_all_docs(self):
+        """Test _all_docs endpoint."""
+        # Create some documents
+        docs = [
+            {"_id": "doc1", "type": "task"},
+            {"_id": "doc2", "type": "task"},
+            {"_id": "doc3", "type": "project"}
+        ]
+
+        for doc in docs:
+            self.backend.handle_request(f"/{doc['_id']}", "PUT", doc)
+
+        # Get all docs
+        response = self.backend.handle_request("/_all_docs", "GET")
+
+        assert response["total_rows"] == 3
+        assert response["offset"] == 0
+        assert len(response["rows"]) == 3
+
+        # Check document IDs are present
+        row_ids = [row["id"] for row in response["rows"]]
+        assert "doc1" in row_ids
+        assert "doc2" in row_ids
+        assert "doc3" in row_ids
+
+        # Check each row has proper structure
+        for row in response["rows"]:
+            assert "id" in row
+            assert "key" in row
+            assert "value" in row
+            assert "rev" in row["value"]
+
+    def test_find_basic_query(self):
+        """Test _find endpoint with basic Mango queries."""
+        # Create test documents
+        docs = [
+            {"_id": "task1", "type": "task", "status": "pending", "priority": 1},
+            {"_id": "task2", "type": "task", "status": "completed", "priority": 2},
+            {"_id": "task3", "type": "task", "status": "pending", "priority": 3},
+            {"_id": "project1", "type": "project", "name": "Test Project"}
+        ]
+
+        for doc in docs:
+            self.backend.handle_request(f"/{doc['_id']}", "PUT", doc)
+
+        # Test simple equality selector
+        response = self.backend.handle_request("/_find", "POST", {
+            "selector": {"type": "task"}
+        })
+
+        assert len(response["docs"]) == 3
+        for doc in response["docs"]:
+            assert doc["type"] == "task"
+
+        # Test compound selector
+        response = self.backend.handle_request("/_find", "POST", {
+            "selector": {"type": "task", "status": "pending"}
+        })
+
+        assert len(response["docs"]) == 2
+        for doc in response["docs"]:
+            assert doc["type"] == "task"
+            assert doc["status"] == "pending"
+
+        # Test with limit
+        response = self.backend.handle_request("/_find", "POST", {
+            "selector": {"type": "task"},
+            "limit": 2
+        })
+
+        assert len(response["docs"]) == 2
+        assert "bookmark" in response
+
+    def test_find_with_operators(self):
+        """Test _find endpoint with Mango operators."""
+        # Create test documents
+        docs = [
+            {"_id": "doc1", "type": "task", "priority": 1, "tags": ["urgent", "bug"]},
+            {"_id": "doc2", "type": "task", "priority": 2, "tags": ["feature"]},
+            {"_id": "doc3", "type": "task", "priority": 3, "tags": ["urgent", "feature"]},
+        ]
+
+        for doc in docs:
+            self.backend.handle_request(f"/{doc['_id']}", "PUT", doc)
+
+        # Test $gt operator
+        response = self.backend.handle_request("/_find", "POST", {
+            "selector": {"priority": {"$gt": 1}}
+        })
+
+        assert len(response["docs"]) == 2
+        for doc in response["docs"]:
+            assert doc["priority"] > 1
+
+        # Test $in operator
+        response = self.backend.handle_request("/_find", "POST", {
+            "selector": {"priority": {"$in": [1, 3]}}
+        })
+
+        assert len(response["docs"]) == 2
+        priorities = [doc["priority"] for doc in response["docs"]]
+        assert 1 in priorities
+        assert 3 in priorities
+
+        # Test $ne operator
+        response = self.backend.handle_request("/_find", "POST", {
+            "selector": {"priority": {"$ne": 2}}
+        })
+
+        assert len(response["docs"]) == 2
+        for doc in response["docs"]:
+            assert doc["priority"] != 2
+
+    def test_bulk_docs(self):
+        """Test _bulk_docs endpoint."""
+        docs = [
+            {"_id": "bulk1", "type": "task", "title": "Bulk Task 1"},
+            {"_id": "bulk2", "type": "task", "title": "Bulk Task 2"},
+            {"_id": "bulk3", "type": "task", "title": "Bulk Task 3"},
+        ]
+
+        response = self.backend.handle_request("/_bulk_docs", "POST", {"docs": docs})
+
+        assert len(response) == 3
+        for i, result in enumerate(response):
+            assert result["ok"] is True
+            assert result["id"] == docs[i]["_id"]
+            assert "rev" in result
+
+        # Verify documents were created
+        for doc in docs:
+            retrieved = self.backend.handle_request(f"/{doc['_id']}", "GET")
+            assert retrieved["type"] == "task"
+            assert retrieved["title"] == doc["title"]
+            assert "_rev" in retrieved
+
+    def test_changes_feed(self):
+        """Test _changes endpoint."""
+        # Initially empty
+        response = self.backend.handle_request("/_changes", "GET")
+        assert response["last_seq"] == 0
+        assert len(response["results"]) == 0
+
+        # Create a document
+        doc = {"_id": "changes_doc", "type": "task"}
+        self.backend.handle_request("/changes_doc", "PUT", doc)
+
+        # Check changes
+        response = self.backend.handle_request("/_changes", "GET")
+        assert response["last_seq"] == 1
+        assert len(response["results"]) == 1
+
+        change = response["results"][0]
+        assert change["id"] == "changes_doc"
+        assert change["seq"] == 1
+        assert change["deleted"] is False
+        assert "changes" in change
+        assert len(change["changes"]) == 1
+
+        # Delete the document
+        self.backend.handle_request("/changes_doc", "DELETE")
+
+        # Check changes again
+        response = self.backend.handle_request("/_changes", "GET")
+        assert response["last_seq"] == 2
+        assert len(response["results"]) == 2
+
+        # Find the deletion change
+        delete_change = next(c for c in response["results"] if c["deleted"] is True)
+        assert delete_change["id"] == "changes_doc"
+        assert delete_change["seq"] == 2
+
+    def test_revs_diff(self):
+        """Test _revs_diff endpoint."""
+        # Create some documents
+        docs = [
+            {"_id": "rev1", "type": "task"},
+            {"_id": "rev2", "type": "task"}
+        ]
+
+        for doc in docs:
+            self.backend.handle_request(f"/{doc['_id']}", "PUT", doc)
+
+        # Request revision diff
+        response = self.backend.handle_request("/_revs_diff", "POST", {
+            "rev1": ["1-abc", "2-def"],
+            "rev2": ["1-xyz"],
+            "missing_doc": ["1-aaa"]
+        })
+
+        assert "rev1" in response
+        assert "rev2" in response
+        assert "missing_doc" in response
+
+        # Existing docs should show missing revisions
+        assert "missing" in response["rev1"]
+        assert "missing" in response["rev2"]
+
+        # Missing doc should have empty missing list
+        assert response["missing_doc"]["missing"] == []
+
+    def test_bulk_get(self):
+        """Test _bulk_get endpoint."""
+        # Create some documents
+        docs = [
+            {"_id": "get1", "type": "task", "title": "Get Task 1"},
+            {"_id": "get2", "type": "task", "title": "Get Task 2"},
+        ]
+
+        for doc in docs:
+            self.backend.handle_request(f"/{doc['_id']}", "PUT", doc)
+
+        # Bulk get documents
+        response = self.backend.handle_request("/_bulk_get", "POST", {
+            "docs": [
+                {"id": "get1"},
+                {"id": "get2"},
+                {"id": "missing_doc"}
+            ]
+        })
+
+        assert "results" in response
+        results = response["results"]
+        assert len(results) == 3
+
+        # Check existing documents
+        existing_docs = [r for r in results if "ok" in r]
+        missing_docs = [r for r in results if "missing" in r]
+
+        assert len(existing_docs) == 2
+        assert len(missing_docs) == 1
+        assert missing_docs[0]["missing"] == "missing_doc"
+
+        # Verify document contents
+        retrieved_titles = [doc["ok"]["title"] for doc in existing_docs]
+        assert "Get Task 1" in retrieved_titles
+        assert "Get Task 2" in retrieved_titles
+
+    def test_session(self):
+        """Test _session endpoint."""
+        # GET session info
+        response = self.backend.handle_request("/_session", "GET")
+        assert response["ok"] is True
+        assert "userCtx" in response
+        assert "info" in response
+
+        # POST to session (login simulation)
+        response = self.backend.handle_request("/_session", "POST", {
+            "name": "test_user",
+            "password": "test_pass"
+        })
+        assert response["ok"] is True
+
+    def test_unimplemented_endpoint(self):
+        """Test unimplemented endpoints return proper error."""
+        response = self.backend.handle_request("/_unimplemented", "GET")
+        assert response["error"] == "not_implemented"
+        assert "Endpoint" in response["reason"]
+        assert "GET" in response["reason"]
+
+    def test_thread_safety(self):
+        """Test that MemoryBackend is thread-safe."""
+        import threading
+        import time
+
+        results = []
+        errors = []
+
+        def worker(worker_id):
+            try:
+                for i in range(10):
+                    doc_id = f"worker_{worker_id}_doc_{i}"
+                    doc = {"_id": doc_id, "worker": worker_id, "index": i}
+                    response = self.backend.handle_request(f"/{doc_id}", "PUT", doc)
+                    results.append((worker_id, i, response))
+                    time.sleep(0.001)  # Small delay to encourage interleaving
+            except Exception as e:
+                errors.append((worker_id, e))
+
+        # Start multiple threads
+        threads = []
+        for worker_id in range(5):
+            thread = threading.Thread(target=worker, args=(worker_id,))
+            threads.append(thread)
+            thread.start()
+
+        # Wait for all threads to complete
+        for thread in threads:
+            thread.join()
+
+        # Verify no errors occurred
+        assert len(errors) == 0, f"Errors occurred: {errors}"
+
+        # Verify all documents were created
+        assert len(results) == 50  # 5 workers * 10 docs each
+
+        # Verify document count
+        all_docs = self.backend.handle_request("/_all_docs", "GET")
+        assert all_docs["total_rows"] == 50
+
+        # Verify all documents are valid
+        for worker_id, i, response in results:
+            assert response["ok"] is True
+            doc_id = f"worker_{worker_id}_doc_{i}"
+            doc = self.backend.handle_request(f"/{doc_id}", "GET")
+            assert doc["worker"] == worker_id
+            assert doc["index"] == i
+
+
+class TestCouchBackend:
+    """Test the CouchBackend implementation."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.base_url = "http://test-couchdb:5984"
+        self.username = "test_user"
+        self.password = "test_pass"
+
+    @patch('src.couchdb_jwt_proxy.dal.httpx.Client')
+    def test_backend_initialization(self, mock_client):
+        """Test CouchBackend initialization."""
+        backend = CouchBackend(self.base_url, self.username, self.password)
+
+        mock_client.assert_called_once_with(auth=(self.username, self.password), timeout=30.0)
+        assert backend.base_url == self.base_url
+
+    @patch('src.couchdb_jwt_proxy.dal.httpx.Client')
+    def test_get_request(self, mock_client):
+        """Test GET request forwarding."""
+        # Mock the response
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.status_code = 200
+        mock_client.return_value.get.return_value = mock_response
+
+        backend = CouchBackend(self.base_url, self.username, self.password)
+        result = backend.handle_request("/_all_dbs", "GET")
+
+        mock_client.return_value.get.assert_called_once_with(f"{self.base_url}/_all_dbs")
+        assert result == {"ok": True}
+
+    @patch('src.couchdb_jwt_proxy.dal.httpx.Client')
+    def test_post_request_with_payload(self, mock_client):
+        """Test POST request with payload."""
+        # Mock the response
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"docs": []}
+        mock_response.status_code = 200
+        mock_client.return_value.post.return_value = mock_response
+
+        backend = CouchBackend(self.base_url, self.username, self.password)
+        payload = {"selector": {"type": "task"}}
+        result = backend.handle_request("/_find", "POST", payload)
+
+        mock_client.return_value.post.assert_called_once_with(
+            f"{self.base_url}/_find", json=payload
+        )
+        assert result == {"docs": []}
+
+    @patch('src.couchdb_jwt_proxy.dal.httpx.Client')
+    def test_http_error_handling(self, mock_client):
+        """Test HTTP error handling."""
+        import httpx
+
+        # Mock an HTTP status error response
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"error": "not_found", "reason": "missing"}
+        mock_response.status_code = 404
+
+        # Create an HTTPStatusError
+        http_error = httpx.HTTPStatusError("404 Not Found", request=MagicMock(), response=mock_response)
+        mock_client.return_value.get.side_effect = http_error
+
+        backend = CouchBackend(self.base_url, self.username, self.password)
+        result = backend.handle_request("/missing_doc", "GET")
+
+        assert result["error"] == "not_found"
+
+
+class TestCouchDAL:
+    """Test the main CouchDAL class."""
+
+    def test_explicit_memory_backend(self):
+        """Test creating DAL with explicit memory backend."""
+        dal = CouchDAL(backend="memory")
+        assert isinstance(dal.backend, MemoryBackend)
+
+    def test_explicit_couch_backend(self):
+        """Test creating DAL with explicit couch backend."""
+        dal = CouchDAL(
+            backend="couch",
+            base_url="http://test:5984",
+            username="user",
+            password="pass"
+        )
+        assert isinstance(dal.backend, CouchBackend)
+        assert dal.backend.base_url == "http://test:5984"
+
+    def test_invalid_backend(self):
+        """Test creating DAL with invalid backend type."""
+        with pytest.raises(ValueError, match="Unknown backend: invalid"):
+            CouchDAL(backend="invalid")
+
+    @patch('src.couchdb_jwt_proxy.dal._is_test_env')
+    def test_auto_detection_in_test_env(self, mock_is_test_env):
+        """Test auto-detection selects memory backend in test env."""
+        mock_is_test_env.return_value = True
+
+        dal = CouchDAL()
+        assert isinstance(dal.backend, MemoryBackend)
+        mock_is_test_env.assert_called_once()
+
+    @patch('src.couchdb_jwt_proxy.dal._is_test_env')
+    def test_auto_detection_in_production_env(self, mock_is_test_env):
+        """Test auto-detection selects couch backend in production."""
+        mock_is_test_env.return_value = False
+
+        # Mock environment variables for CouchDB
+        with patch.dict(os.environ, {
+            'COUCHDB_INTERNAL_URL': 'http://localhost:5984',
+            'COUCHDB_USER': 'admin',
+            'COUCHDB_PASSWORD': 'password'
+        }):
+            dal = CouchDAL()
+            assert isinstance(dal.backend, CouchBackend)
+        mock_is_test_env.assert_called_once()
+
+    def test_get_method_forwarding(self):
+        """Test that get() method properly forwards to backend."""
+        dal = CouchDAL(backend="memory")
+
+        # Create a test document first
+        doc = {"_id": "test", "type": "test"}
+        result = dal.get("/test", "PUT", doc)
+        assert result["ok"] is True
+
+        # Retrieve it
+        result = dal.get("/test", "GET")
+        assert result["type"] == "test"
+
+    def test_get_method_with_different_methods(self):
+        """Test get() method with different HTTP methods."""
+        dal = CouchDAL(backend="memory")
+
+        # GET on root
+        result = dal.get("/", "GET")
+        assert "db_name" in result
+
+        # POST to _find
+        result = dal.get("/_find", "POST", {"selector": {}})
+        assert "docs" in result
+
+
+class TestUtilityFunctions:
+    """Test utility functions."""
+
+    def test_is_test_env_with_pytest(self):
+        """Test _is_test_env detects pytest."""
+        # Should return True when running under pytest
+        assert _is_test_env() is True
+
+    @patch.dict(os.environ, {'DAL_BACKEND': 'memory'})
+    def test_is_test_env_with_env_var(self):
+        """Test _is_test_env respects DAL_BACKEND env var."""
+        assert _is_test_env() is True
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch('sys.modules', {})  # Remove pytest from modules
+    def test_is_test_env_in_production(self):
+        """Test _is_test_env returns False in production."""
+        # Remove pytest from sys.modules for this test
+        original_modules = __import__('sys').modules
+        if 'pytest' in original_modules:
+            del original_modules['pytest']
+
+        # Need to re-import the function to pick up the change
+        from src.couchdb_jwt_proxy.dal import _is_test_env
+        assert _is_test_env() is False
+
+
+class TestCreateDalFunction:
+    """Test the convenience create_dal function."""
+
+    def test_create_dal_default(self):
+        """Test create_dal with default parameters."""
+        dal = create_dal()
+        assert isinstance(dal, CouchDAL)
+
+    def test_create_dal_explicit_backend(self):
+        """Test create_dal with explicit backend."""
+        dal = create_dal(backend="memory")
+        assert isinstance(dal, CouchDAL)
+        assert isinstance(dal.backend, MemoryBackend)
+
+    def test_create_dal_with_kwargs(self):
+        """Test create_dal passes kwargs to backend."""
+        dal = create_dal(
+            backend="couch",
+            base_url="http://custom:5984",
+            username="admin"
+        )
+        assert isinstance(dal.backend, CouchBackend)
+        assert dal.backend.base_url == "http://custom:5984"
+
+
+class TestIntegrationScenarios:
+    """Integration tests for realistic usage scenarios."""
+
+    def test_full_document_lifecycle(self):
+        """Test complete document lifecycle in memory backend."""
+        dal = CouchDAL(backend="memory")
+
+        # 1. Create document
+        doc = {
+            "_id": "lifecycle_test",
+            "type": "task",
+            "title": "Integration Test Task",
+            "status": "pending",
+            "priority": 1
+        }
+        result = dal.get("/lifecycle_test", "PUT", doc)
+        assert result["ok"] is True
+        rev = result["_rev"]
+
+        # 2. Retrieve document
+        result = dal.get("/lifecycle_test", "GET")
+        assert result["type"] == "task"
+        assert result["title"] == "Integration Test Task"
+        assert result["status"] == "pending"
+
+        # 3. Update document
+        updated_doc = result.copy()
+        updated_doc["status"] = "completed"
+        result = dal.get("/lifecycle_test", "PUT", updated_doc)
+        assert result["ok"] is True
+        assert result["_rev"] != rev  # Revision should change
+
+        # 4. Query document
+        result = dal.get("/_find", "POST", {
+            "selector": {"type": "task", "status": "completed"}
+        })
+        assert len(result["docs"]) == 1
+        assert result["docs"][0]["status"] == "completed"
+
+        # 5. Verify in _all_docs
+        result = dal.get("/_all_docs", "GET")
+        doc_ids = [row["id"] for row in result["rows"]]
+        assert "lifecycle_test" in doc_ids
+
+        # 6. Delete document
+        result = dal.get("/lifecycle_test", "DELETE")
+        assert result["ok"] is True
+
+        # 7. Verify deletion
+        result = dal.get("/lifecycle_test", "GET")
+        assert result["error"] == "not_found"
+
+    def test_bulk_operations_and_querying(self):
+        """Test bulk document operations followed by querying."""
+        dal = CouchDAL(backend="memory")
+
+        # Bulk create multiple documents
+        docs = [
+            {"_id": f"bulk_task_{i}", "type": "task", "status": "pending", "priority": i % 3 + 1}
+            for i in range(10)
+        ]
+
+        results = dal.get("/_bulk_docs", "POST", {"docs": docs})
+        assert len(results) == 10
+        for result in results:
+            assert result["ok"] is True
+
+        # Query all tasks
+        result = dal.get("/_find", "POST", {"selector": {"type": "task"}})
+        assert len(result["docs"]) == 10
+
+        # Query with specific status
+        result = dal.get("/_find", "POST", {"selector": {"type": "task", "status": "pending"}})
+        assert len(result["docs"]) == 10
+
+        # Query with priority > 1
+        result = dal.get("/_find", "POST", {
+            "selector": {"type": "task", "priority": {"$gt": 1}}
+        })
+        assert len(result["docs"]) == 6  # priorities 2 and 3
+
+        # Verify _all_docs count
+        result = dal.get("/_all_docs", "GET")
+        assert result["total_rows"] == 10
+
+    def test_local_documents_integration(self):
+        """Test local documents integration with change tracking."""
+        dal = CouchDAL(backend="memory")
+
+        # Create some local documents
+        checkpoints = [
+            {"seq": 0, "last_processed": "2023-01-01T00:00:00Z"},
+            {"seq": 100, "last_processed": "2023-01-02T00:00:00Z"}
+        ]
+
+        for i, checkpoint in enumerate(checkpoints):
+            result = dal.get(f"/_local/checkpoint_{i}", "PUT", checkpoint)
+            assert result["ok"] is True
+
+        # Retrieve local documents
+        for i, expected in enumerate(checkpoints):
+            result = dal.get(f"/_local/checkpoint_{i}", "GET")
+            assert result == expected
+
+        # Verify regular documents are separate
+        regular_doc = {"_id": "regular", "type": "task"}
+        result = dal.get("/regular", "PUT", regular_doc)
+        assert result["ok"] is True
+
+        # Local docs should not appear in _all_docs
+        result = dal.get("/_all_docs", "GET")
+        doc_ids = [row["id"] for row in result["rows"]]
+        assert "regular" in doc_ids
+        assert "_local/checkpoint_0" not in doc_ids
+        assert "_local/checkpoint_1" not in doc_ids
+
+    def test_changes_feed_tracking(self):
+        """Test change feed tracking through multiple operations."""
+        dal = CouchDAL(backend="memory")
+
+        # Initial state
+        result = dal.get("/_changes", "GET")
+        assert result["last_seq"] == 0
+        assert len(result["results"]) == 0
+
+        # Create documents
+        for i in range(3):
+            doc = {"_id": f"change_doc_{i}", "type": "task", "seq": i}
+            dal.get(f"/change_doc_{i}", "PUT", doc)
+
+        # Check changes after creates
+        result = dal.get("/_changes", "GET")
+        assert result["last_seq"] == 3
+        assert len(result["results"]) == 3
+
+        # Update one document
+        doc = dal.get("/change_doc_1", "GET")
+        doc["status"] = "updated"
+        dal.get("/change_doc_1", "PUT", doc)
+
+        # Check changes after update
+        result = dal.get("/_changes", "GET")
+        assert result["last_seq"] == 4
+        assert len(result["results"]) == 4
+
+        # Delete one document
+        dal.get("/change_doc_0", "DELETE")
+
+        # Check changes after deletion
+        result = dal.get("/_changes", "GET")
+        assert result["last_seq"] == 5
+        assert len(result["results"]) == 5
+
+        # Verify deletion is marked
+        deleted_changes = [c for c in result["results"] if c["deleted"]]
+        assert len(deleted_changes) == 1
+        assert deleted_changes[0]["id"] == "change_doc_0"
+
+
+if __name__ == "__main__":
+    # Run tests with pytest
+    pytest.main([__file__, "-v"])
