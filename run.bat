@@ -54,15 +54,33 @@ if %ERRORLEVEL% equ 0 (
 goto end
 
 :run
-echo Starting CouchDB JWT Proxy...
+echo Checking port availability...
 set PYTHONPATH=src
+call uv run python -m couchdb_jwt_proxy.check_port
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] Port check failed. Aborting startup.
+    exit /b 1
+)
+
+echo Starting CouchDB JWT Proxy...
 call uv run python -m couchdb_jwt_proxy.main
 goto end
 
+
+
 :dev-run
-echo Starting proxy with auto-reload...
+echo Checking port availability...
 set PYTHONPATH=src
-call uv run uvicorn couchdb_jwt_proxy.main:app --reload --port 5985
+call uv run python -m couchdb_jwt_proxy.check_port
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] Port check failed. Aborting startup.
+    exit /b 1
+)
+
+echo Starting proxy with auto-reload...
+REM Default to 127.0.0.1 if PROXY_HOST is not set, to match uvicorn default
+if "%PROXY_HOST%"=="" set PROXY_HOST=127.0.0.1
+call uv run uvicorn couchdb_jwt_proxy.main:app --reload --host %PROXY_HOST% --port 5985
 goto end
 
 :test

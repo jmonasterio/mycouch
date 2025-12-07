@@ -35,19 +35,30 @@ PROXY_PORT = os.getenv("PROXY_PORT")
 LOG_LEVEL = os.getenv("LOG_LEVEL")
 
 # Default application configuration (will be loaded from database at startup)
-APPLICATIONS: Dict[str, List[str]] = {}
-DEFAULT_APPLICATIONS: Dict[str, List[str]] = {
-    # Default fallback applications - will be created in database if missing
-    "https://desired-lab-27.clerk.accounts.dev": ["roady", "couch-sitter"],  # Temporary: support both
-    "https://clerk.jmonasterio.github.io": ["roady"],
-    "https://enabled-hawk-56.clerk.accounts.dev": ["couch-sitter"],
-}
+APPLICATIONS: Dict[str, Dict[str, Any]] = {}
+
+# NOTE: DEFAULT_APPLICATIONS has been removed. All application configuration
+# must come from the database. Add application documents to the couch-sitter
+# database with the following structure:
+# {
+#   "_id": "app_<issuer>",
+#   "type": "application",
+#   "issuer": "https://your-clerk-instance.clerk.accounts.dev",
+#   "databaseNames": ["roady", "couch-sitter"],
+#   "clerkSecretKey": "sk_...",
+#   "createdAt": "...",
+#   "updatedAt": "..."
+# }
 
 # Clerk configuration (for RS256 JWT validation)
 CLERK_ISSUER_URL = os.getenv("CLERK_ISSUER_URL")
 
 # Clerk Backend API configuration (for session metadata management)
 CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
+
+# ... (imports and other setup)
+
+# ... (imports and other setup)
 
 # Tenant configuration (always enabled)
 TENANT_FIELD = os.getenv("TENANT_FIELD")
@@ -185,29 +196,47 @@ def decode_token_unsafe(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 # Clerk JWT validation (RS256)
-@lru_cache(maxsize=1)
-def get_clerk_jwks_client() -> Optional[PyJWKClient]:
+@lru_cache(maxsize=10)
+def get_clerk_jwks_client(issuer: str) -> Optional[PyJWKClient]:
     """Get cached JWKS client for Clerk token validation"""
-    if not CLERK_JWKS_URL:
+    if not issuer:
         return None
+        
+    jwks_url = f"{issuer.rstrip('/')}/.well-known/jwks.json"
+    
     try:
-        client = PyJWKClient(CLERK_JWKS_URL, cache_keys=True)
-        logger.info(f"Clerk JWKS client initialized: {CLERK_JWKS_URL}")
+        client = PyJWKClient(jwks_url, cache_keys=True)
+        logger.info(f"Clerk JWKS client initialized: {jwks_url}")
         return client
     except Exception as e:
-        logger.error(f"Failed to initialize Clerk JWKS client: {e}")
+        logger.error(f"Failed to initialize Clerk JWKS client for {issuer}: {e}")
         return None
 
 def verify_clerk_jwt(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Verify Clerk JWT token (RS256). Returns (payload, error_reason)"""
     try:
-        # Get JWKS client
-        jwks_client = get_clerk_jwks_client()
+        # 1. Extract issuer from unverified token
+        unverified_payload = decode_token_unsafe(token)
+        if not unverified_payload:
+             return None, "invalid_token_format"
+             
+        issuer = unverified_payload.get("iss")
+        if not issuer:
+            return None, "missing_issuer_claim"
+            
+        # 2. Validate issuer is registered
+        # Note: APPLICATIONS keys are issuers
+        if issuer not in APPLICATIONS:
+             logger.warning(f"Unknown issuer: {issuer}")
+             return None, "unknown_issuer"
+
+        # 3. Get JWKS client for this issuer
+        jwks_client = get_clerk_jwks_client(issuer)
         if not jwks_client:
-            logger.error(f"JWKS client unavailable for issuer: {CLERK_ISSUER_URL}")
+            logger.error(f"JWKS client unavailable for issuer: {issuer}")
             return None, "clerk_jwks_unavailable"
 
-        logger.debug(f"Attempting to validate JWT with JWKS from: {CLERK_JWKS_URL}")
+        logger.debug(f"Attempting to validate JWT with JWKS from issuer: {issuer}")
 
         # Get signing key
         signing_key = jwks_client.get_signing_key_from_jwt(token)
@@ -218,8 +247,10 @@ def verify_clerk_jwt(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str
             signing_key.key,
             algorithms=["RS256"],
             audience=None,  # Clerk JWTs don't have audience claim by default
+            issuer=issuer,  # Verify issuer matches
             options={
                 "verify_aud": False,
+                "verify_iss": True,
                 "leeway": 300  # Allow 5 minutes of clock skew (increased from 60s to handle larger drifts)
             }
         )
@@ -303,13 +334,33 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
     }
 
     # Determine application type from request path or issuer
-    # For now, we'll use a simple heuristic based on the request path
-    is_roady_request = request_path and "roady" in request_path.lower()
-    is_couch_sitter_request = request_path and ("couch-sitter" in request_path.lower() or "couch_sitter" in request_path.lower())
-
-    # If we can't determine from path, check the issuer
+    is_roady_request = False
+    is_couch_sitter_request = False
+    
+    # 1. Check issuer against registered applications (most reliable)
+    issuer = payload.get("iss", "")
+    if issuer in APPLICATIONS:
+        app_config = APPLICATIONS[issuer]
+        dbs = []
+        if isinstance(app_config, dict):
+            dbs = app_config.get("databaseNames", [])
+        elif isinstance(app_config, list):
+            dbs = app_config
+            
+        if "roady" in dbs:
+            is_roady_request = True
+        elif "couch-sitter" in dbs:
+            is_couch_sitter_request = True
+            
+    # 2. Fallback to request path check
     if not is_roady_request and not is_couch_sitter_request:
-        issuer = payload.get("iss", "")
+        if request_path and "roady" in request_path.lower():
+            is_roady_request = True
+        elif request_path and ("couch-sitter" in request_path.lower() or "couch_sitter" in request_path.lower()):
+            is_couch_sitter_request = True
+            
+    # 3. Fallback to issuer string check
+    if not is_roady_request and not is_couch_sitter_request:
         if "roady" in issuer.lower():
             is_roady_request = True
         elif "couch-sitter" in issuer.lower() or "couch_sitter" in issuer.lower():
@@ -361,46 +412,21 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
             logger.error(f"Failed to get tenant info for couch-sitter sub '{sub}': {e}")
             raise
 
-    # For roady, try to get active tenant from Clerk metadata first
-    logger.debug(f"Roady request - checking for active tenant for sub '{sub}'")
+    # For roady, strictly get active tenant from JWT claims
+    logger.debug(f"Roady request - checking for active tenant in JWT for sub '{sub}'")
 
-    active_tenant_id = None
-    if clerk_service.is_configured() and user_info.get("session_id"):
-        try:
-            active_tenant_id = await clerk_service.get_user_active_tenant(
-                user_id=user_info["user_id"],
-                session_id=user_info["session_id"]
-            )
-            if active_tenant_id:
-                logger.debug(f"Found active tenant in Clerk metadata for roady sub '{sub}': {active_tenant_id}")
-        except Exception as e:
-            logger.warning(f"Failed to get active tenant from Clerk metadata for sub '{sub}': {e}")
-
-    # Fallback: get personal tenant from database
-    if not active_tenant_id:
-        try:
-            # Try cache first
-            cached_info = user_cache.get_user_by_sub_hash(sub_hash)
-            if cached_info:
-                active_tenant_id = cached_info.tenant_id
-                logger.debug(f"Using cached personal tenant as fallback for roady sub '{sub}': {active_tenant_id}")
-            else:
-                # Cache miss - fetch from database
-                user_tenant_info = await couch_sitter_service.get_user_tenant_info(
-                    sub=sub,
-                    email=user_info.get("email"),
-                    name=user_info.get("name"),
-                    requested_db_name=requested_db_name
-                )
-                active_tenant_id = user_tenant_info.tenant_id
-
-                # Cache the result
-                user_cache.set_user(sub_hash, user_tenant_info)
-
-                logger.info(f"Using personal tenant as fallback for roady sub '{sub}': {active_tenant_id}")
-        except Exception as e:
-            logger.error(f"Failed to get personal tenant fallback for roady sub '{sub}': {e}")
-            raise
+    active_tenant_id = payload.get("active_tenant_id") or payload.get("tenant_id")
+    
+    # Check metadata inside JWT if not at top level (Clerk sometimes puts it there)
+    if not active_tenant_id and payload.get("metadata"):
+        active_tenant_id = payload.get("metadata").get("active_tenant_id")
+        
+    if active_tenant_id:
+         logger.debug(f"Found active tenant in JWT claims: {active_tenant_id}")
+    else:
+         # STRICT ENFORCEMENT: No fallback to backend API or personal tenant
+         logger.warning(f"Missing active_tenant_id in JWT for roady request - rejecting request")
+         raise HTTPException(status_code=401, detail="Missing active_tenant_id claim in JWT. Please refresh your token.")
 
     return active_tenant_id
 
@@ -772,30 +798,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"Incoming request: {request.method} {request.url}", flush=True)
+    try:
+        response = await call_next(request)
+        print(f"Response status: {response.status_code}", flush=True)
+        return response
+    except Exception as e:
+        print(f"Request failed: {e}", flush=True)
+        raise
+
 async def initialize_applications():
-    """Initialize applications from database and ensure defaults exist"""
+    """Initialize applications from database - fail if database is not accessible"""
     global APPLICATIONS
 
     logger.info("Initializing applications from database...")
 
     try:
-        # Ensure default applications exist in database
-        for issuer, database_names in DEFAULT_APPLICATIONS.items():
-            await couch_sitter_service.ensure_app_exists(issuer, database_names)
-
         # Load all applications from database
         APPLICATIONS = await couch_sitter_service.load_all_apps()
         logger.info(f"initialize_applications: Loaded apps: {APPLICATIONS}")
 
+        if not APPLICATIONS:
+            logger.error("No applications found in database")
+            raise RuntimeError("No applications configured in database. Please add application documents to the couch-sitter database.")
+
         logger.info(f"✓ Loaded {len(APPLICATIONS)} applications from database")
-        for issuer, databases in APPLICATIONS.items():
-            logger.info(f"  {issuer} -> {databases}")
+        for issuer, app_config in APPLICATIONS.items():
+            logger.info(f"  {issuer} -> {app_config}")
 
     except Exception as e:
         logger.error(f"Failed to initialize applications from database: {e}")
-        logger.warning("Falling back to default application configuration")
-        APPLICATIONS = DEFAULT_APPLICATIONS.copy()
-        logger.warning(f"Using {len(APPLICATIONS)} fallback applications")
+        logger.error("Application startup failed - database configuration is required")
+        raise RuntimeError(f"Cannot start without database configuration: {e}") from e
 
 
 
@@ -811,6 +847,13 @@ async def get_my_tenants(
     Get all tenants for the authenticated user.
     This endpoint works for both roady and couch-sitter applications.
     """
+    print("=" * 80, flush=True)
+    print("GET /my-tenants called", flush=True)
+    print("=" * 80, flush=True)
+    logger.info("=" * 80)
+    logger.info("GET /my-tenants called")
+    logger.info("=" * 80)
+    
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing authorization header")
 
@@ -825,28 +868,140 @@ async def get_my_tenants(
         if not user_info:
             raise HTTPException(status_code=401, detail="Invalid JWT token")
 
+        # Determine database name from issuer to ensure correct tenant type
+        issuer = user_info.get("iss")
+        
+        # Fallback: If name or email is missing, try to fetch from Clerk API
+        if (not user_info.get("email") or not user_info.get("name")) and clerk_service.is_configured():
+            logger.info(f"Missing email/name in JWT (email={user_info.get('email')}, name={user_info.get('name')}), fetching from Clerk API...")
+            details = await clerk_service.fetch_user_details(user_info["sub"], issuer)
+            if details:
+                logger.info(f"Fetched details from Clerk API: {details}")
+                if details.get("email"):
+                    user_info["email"] = details["email"]
+                if details.get("name"):
+                    user_info["name"] = details["name"]
+            else:
+                logger.warning(f"Failed to fetch user details from Clerk API for {user_info['sub']}")
+        elif not clerk_service.is_configured():
+            logger.warning("Clerk service not configured - cannot fetch missing user details")
+        else:
+            logger.info(f"User info complete from JWT: email={user_info.get('email')}, name={user_info.get('name')}")
+        
+        # CRITICAL: Validate that we have email and name before proceeding
+        if not user_info.get("email") or not user_info.get("name"):
+            warning_msg = f"""
+================================================================================
+WARNING: Missing required user fields in JWT
+================================================================================
+Email: {user_info.get('email')}
+Name: {user_info.get('name')}
+
+To fix this, configure your Clerk Session Token to include:
+{{
+    "active_tenant_id": "{{{{session.public_metadata.active_tenant_id}}}}",
+    "email": "{{{{user.primary_email_address}}}}",
+    "name": "{{{{user.full_name}}}}"
+}}
+
+Clerk Dashboard → Sessions → Customize session token
+================================================================================
+"""
+            logger.warning(warning_msg)
+            # Still raise error to prevent incomplete user creation
+            raise HTTPException(status_code=500, detail="Missing required fields: email and/or name. Check server logs for configuration instructions.")
+        
+        logger.info(f"DEBUG: Issuer from JWT: {issuer}")
+        logger.info(f"DEBUG: APPLICATIONS keys: {list(APPLICATIONS.keys())}")
+        
+        requested_db_name = None
+        
+        # Get app config from loaded applications (no fallback)
+        if not issuer:
+            logger.error("No issuer found in JWT")
+            raise HTTPException(status_code=401, detail="Invalid JWT: missing issuer")
+            
+        if issuer not in APPLICATIONS:
+            logger.error(f"Unknown issuer: {issuer}. Available issuers: {list(APPLICATIONS.keys())}")
+            raise HTTPException(status_code=401, detail=f"Unknown application issuer: {issuer}")
+        
+        app_config = APPLICATIONS[issuer]
+        if isinstance(app_config, dict):
+            dbs = app_config.get("databaseNames", [])
+            if dbs:
+                requested_db_name = dbs[0]
+        elif isinstance(app_config, list) and app_config:
+            requested_db_name = app_config[0]
+
+        logger.info(f"DEBUG: requested_db_name: {requested_db_name}")
+
+        # Resolve App ID from DB Name to support correct linking
+        app_doc = await couch_sitter_service.find_application_by_db_name(requested_db_name)
+        app_id = app_doc.get("_id") if app_doc else None
+        
+        # Ensure user exists (passing resolved ID if available)
+        creation_app_id = app_id or requested_db_name
+
         # Get user's tenants from database
         user_tenant_info = await couch_sitter_service.get_user_tenant_info(
             sub=user_info["sub"],
             email=user_info.get("email"),
-            name=user_info.get("name")
+            name=user_info.get("name"),
+            requested_db_name=creation_app_id
         )
 
         # Get all tenants for this user (not just personal tenant)
-        from .user_tenant_cache import UserTenantInfo
-        # For now, return the personal tenant as the primary tenant
-        # This will be extended when we implement multi-tenant management
-        tenants = [{
-            "tenantId": user_tenant_info.tenant_id,
-            "name": f"Personal Tenant for {user_info.get('name', user_info['sub'][:8])}",
-            "role": "owner",
-            "personal": True,
-            "active": True  # Personal tenant is always active for now
-        }]
+        tenants, personal_tenant_id = await couch_sitter_service.get_user_tenants(user_info["sub"])
+
+        # VALIDATION: Filter tenants for this application
+        # If no requested_db_name, we might want to return all, but for safety in roady context, 
+        # let's be strict if we know we are in an app context.
+        filtered_tenants = []
+        if requested_db_name:
+             logger.info(f"Filtering tenants for application: {requested_db_name} (AppID: {app_id})")
+             for t in tenants:
+                 t_app_id = t.get("applicationId")
+                 
+                 if requested_db_name == 'couch-sitter':
+                     filtered_tenants.append(t)
+                 # Match against DB name (legacy) OR Resolved App ID (correct)
+                 elif t_app_id == requested_db_name or (app_id and t_app_id == app_id):
+                     filtered_tenants.append(t)
+                 elif not t_app_id:
+                     logger.debug(f"Skipping tenant {t.get('tenantId')} without applicationId")
+        else:
+            # No specific app requested (unlikely with current JWT logic), return all
+            filtered_tenants = tenants
+
+        logger.info(f"Tenant filtering: {len(tenants)} -> {len(filtered_tenants)} tenants")
+
+        # Mark the active tenant
+        # Priority 1: App-specific Personal Tenant (from user_tenant_info) is a safe default
+        active_tenant_id = user_tenant_info.tenant_id
+        
+        # Priority 2: Active tenant from Clerk metadata (if valid for this app)
+        if clerk_service.is_configured() and user_info.get("session_id"):
+             clerk_active_tenant = await clerk_service.get_user_active_tenant(
+                 user_id=user_info["user_id"],
+                 session_id=user_info["session_id"],
+                 issuer=user_info.get("iss")
+             )
+             
+             if clerk_active_tenant:
+                 # VALIDATE: Does this tenant exist in our filtered list?
+                 # If we switched apps, we might have an active_tenant_id from the OLD app.
+                 # We must NOT use it if it's not accessible in the NEW app.
+                 is_valid = any(t["tenantId"] == clerk_active_tenant for t in filtered_tenants)
+                 
+                 if is_valid:
+                     active_tenant_id = clerk_active_tenant
+                     logger.info(f"Using valid active tenant from Clerk: {active_tenant_id}")
+                 else:
+                     logger.warning(f"Ignored active tenant {clerk_active_tenant} from Clerk - not valid for app {requested_db_name}")
 
         return {
-            "tenants": tenants,
-            "activeTenantId": user_tenant_info.tenant_id,
+            "tenants": filtered_tenants,
+            "activeTenantId": active_tenant_id,
             "userId": user_tenant_info.user_id,
             "sub": user_tenant_info.sub
         }
@@ -854,6 +1009,8 @@ async def get_my_tenants(
     except Exception as e:
         logger.error(f"Error getting user tenants: {e}")
         raise HTTPException(status_code=500, detail="Failed to get tenant information")
+
+
 
 @app.post("/choose-tenant")
 async def choose_tenant(
@@ -892,9 +1049,14 @@ async def choose_tenant(
             name=user_info.get("name")
         )
 
+        # Get all accessible tenants for validation
+        tenants, personal_tenant_id = await couch_sitter_service.get_user_tenants(user_info["sub"])
+        accessible_tenant_ids = [t["tenantId"] for t in tenants]
+
         # Verify the user has access to this tenant
-        # For now, only allow selecting the personal tenant
-        if tenant_id != user_tenant_info.tenant_id:
+        if tenant_id not in accessible_tenant_ids:
+            logger.warning(f"User {user_info['sub']} attempted to select inaccessible tenant: {tenant_id}")
+            logger.warning(f"Accessible tenants: {accessible_tenant_ids}")
             raise HTTPException(status_code=403, detail="Access denied: tenant not found")
 
         # Update active tenant in Clerk metadata (if Clerk Backend API is configured)
@@ -902,7 +1064,8 @@ async def choose_tenant(
             success = await clerk_service.update_active_tenant_in_session(
                 user_id=user_info["user_id"],
                 session_id=user_info["session_id"],
-                tenant_id=tenant_id
+                tenant_id=tenant_id,
+                issuer=user_info.get("iss")
             )
             if success:
                 logger.info(f"Updated active tenant in Clerk metadata for user {user_info['user_id']}: {tenant_id}")
@@ -954,7 +1117,8 @@ async def get_active_tenant(
         if clerk_service.is_configured() and user_info.get("session_id"):
             active_tenant_id = await clerk_service.get_user_active_tenant(
                 user_id=user_info["user_id"],
-                session_id=user_info["session_id"]
+                session_id=user_info["session_id"],
+                issuer=user_info.get("iss")
             )
 
         # Fallback: get personal tenant from database
@@ -1147,8 +1311,12 @@ async def proxy_couchdb(
     allowed_databases = {'couch-sitter', '_users', '_replicator'}
     
     # Add all databases from registered applications
-    for issuer, databases in APPLICATIONS.items():
-        allowed_databases.update(databases)
+    for issuer, app_config in APPLICATIONS.items():
+        if isinstance(app_config, dict) and "databaseNames" in app_config:
+            allowed_databases.update(app_config["databaseNames"])
+        elif isinstance(app_config, list):
+            # Handle legacy format (list of strings) just in case
+            allowed_databases.update(app_config)
     
     # Convert to list for error message
     allowed_databases_list = sorted(list(allowed_databases))

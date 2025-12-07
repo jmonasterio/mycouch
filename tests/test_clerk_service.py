@@ -54,7 +54,7 @@ def clerk_service_with_client(mock_config):
         mock_clerk_class.return_value = mock_client
 
         service = ClerkService()
-        service.clerk_client = mock_client
+        service.clients["https://test-clerk.clerk.accounts.dev"] = mock_client
         return service, mock_client
 
 
@@ -71,14 +71,15 @@ class TestClerkService:
 
     def test_clerk_service_initialization(self, clerk_service):
         """Test ClerkService initialization"""
-        assert clerk_service.issuer_url == "https://test-clerk.clerk.accounts.dev"
-        assert clerk_service.secret_key == "test-secret-key"
+        assert clerk_service.default_issuer == "https://test-clerk.clerk.accounts.dev"
+        assert "https://test-clerk.clerk.accounts.dev" in clerk_service.clients
 
     def test_clerk_service_missing_issuer_url(self):
         """Test ClerkService initialization with missing issuer URL"""
         with patch('couchdb_jwt_proxy.clerk_service.os.getenv', return_value=None):
-            with pytest.raises(ValueError, match="CLERK_ISSUER_URL is required"):
-                ClerkService()
+            service = ClerkService()
+            assert service.default_issuer is None
+            assert len(service.clients) == 0
 
     def test_clerk_service_no_api_available(self):
         """Test ClerkService when Clerk Backend API is not available"""
@@ -88,7 +89,7 @@ class TestClerkService:
             mock_getenv.side_effect = lambda key, default=None: "test-value" if key == "CLERK_ISSUER_URL" else None
 
             service = ClerkService()
-            assert service.clerk_client is None
+            assert len(service.clients) == 0
 
     def test_clerk_service_no_secret_key(self):
         """Test ClerkService when secret key is missing"""
@@ -98,7 +99,7 @@ class TestClerkService:
             mock_getenv.side_effect = lambda key, default=None: "test-value" if key == "CLERK_ISSUER_URL" else None
 
             service = ClerkService()
-            assert service.clerk_client is None
+            assert len(service.clients) == 0
 
     def test_is_configured(self, clerk_service):
         """Test is_configured method"""
@@ -116,7 +117,7 @@ class TestClerkService:
             mock_getenv.return_value = "https://test-clerk.clerk.accounts.dev"
             mock_clerk.return_value = MagicMock()
             service = ClerkService()
-            service.clerk_client = None
+            service.clients.clear()
             assert service.is_configured() is False
 
         # When properly configured
@@ -125,13 +126,13 @@ class TestClerkService:
             mock_getenv.return_value = "https://test-clerk.clerk.accounts.dev"
             mock_clerk.return_value = MagicMock()
             service = ClerkService()
-            service.clerk_client = MagicMock()
+            service.clients["test"] = MagicMock()
             assert service.is_configured() is True
 
     @pytest.mark.asyncio
     async def test_verify_session_token_no_client(self, clerk_service):
         """Test session verification when client is not configured"""
-        clerk_service.clerk_client = None
+        clerk_service.clients.clear()
 
         result = await clerk_service.verify_session_token("test-token")
         assert result is None
@@ -170,7 +171,7 @@ class TestClerkService:
     @pytest.mark.asyncio
     async def test_get_user_session_metadata_no_client(self, clerk_service):
         """Test getting session metadata when client is not configured"""
-        clerk_service.clerk_client = None
+        clerk_service.clients.clear()
 
         result = await clerk_service.get_user_session_metadata("user_123", "session_123")
         assert result is None
@@ -222,7 +223,7 @@ class TestClerkService:
     @pytest.mark.asyncio
     async def test_update_active_tenant_in_session_no_client(self, clerk_service):
         """Test updating active tenant when client is not configured"""
-        clerk_service.clerk_client = None
+        clerk_service.clients.clear()
 
         result = await clerk_service.update_active_tenant_in_session("user_123", "session_123", "tenant_456")
         assert result is False
@@ -290,7 +291,7 @@ class TestClerkService:
     @pytest.mark.asyncio
     async def test_get_user_active_tenant_no_client(self, clerk_service):
         """Test getting active tenant when client is not configured"""
-        clerk_service.clerk_client = None
+        clerk_service.clients.clear()
 
         result = await clerk_service.get_user_active_tenant("user_123", "session_123")
         assert result is None
@@ -366,7 +367,7 @@ class TestClerkService:
     @pytest.mark.asyncio
     async def test_update_user_active_tenant_no_client(self, clerk_service):
         """Test updating user active tenant when client is not configured"""
-        clerk_service.clerk_client = None
+        clerk_service.clients.clear()
 
         result = await clerk_service.update_user_active_tenant("user_123", "tenant_456")
         assert result is False

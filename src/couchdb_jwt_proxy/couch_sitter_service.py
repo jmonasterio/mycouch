@@ -180,6 +180,45 @@ class CouchSitterService:
             logger.error(f"Unexpected error finding user {sub_hash}: {e}")
             return None
 
+    async def find_application_by_db_name(self, db_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Find an application document by its database name.
+
+        Args:
+            db_name: The database name to search for (e.g. 'roady')
+
+        Returns:
+            Application document dict if found, None otherwise
+        """
+        try:
+            # Look for app by databaseName
+            query = {
+                "selector": {
+                    "type": "application",
+                    "databaseName": db_name
+                },
+                "limit": 1
+            }
+
+            response = await self._make_request("POST", "_find", json=query)
+            result = response.json()
+
+            docs = result.get("docs", [])
+            if docs:
+                app_doc = docs[0]
+                logger.debug(f"Found app for db {db_name}: {app_doc.get('_id')}")
+                return app_doc
+            
+            # Fallback: check if db_name matches name (case insensitive?)
+            # Or strict match on name field if databaseName is empty?
+            # For now just strict databaseName match as that is how apps are configured.
+            logger.debug(f"App not found for db: {db_name}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error finding app for db {db_name}: {e}")
+            return None
+
     async def create_user_with_personal_tenant(self, sub: str, email: str = None, name: str = None, requested_db_name: str = None) -> Tuple[Dict, Dict]:
         """
         Creates a user and their personal tenant.
@@ -292,6 +331,9 @@ class CouchSitterService:
         """
         user_id = user_doc.get("_id")
         personal_tenant_id = user_doc.get("personalTenantId")
+        
+        # Use requested DB name for applicationId, or default to couch-sitter DB name
+        app_id = requested_db_name or self.db_name
 
         if personal_tenant_id:
             # Check if the personal tenant actually exists
@@ -301,6 +343,16 @@ class CouchSitterService:
 
                 if tenant_doc.get("isPersonal", False):
                     logger.debug(f"Personal tenant exists: {personal_tenant_id}")
+                    
+                    # FIX: Check if applicationId matches requested app (e.g. "roady")
+                    # If tenant has "app_test" or "couch-sitter" but user is logging into "roady", update it
+                    current_app_id = tenant_doc.get("applicationId")
+                    if app_id and app_id != "couch-sitter" and current_app_id != app_id:
+                        logger.info(f"Updating tenant {personal_tenant_id} applicationId from '{current_app_id}' to '{app_id}'")
+                        tenant_doc["applicationId"] = app_id
+                        tenant_doc["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                        await self._make_request("PUT", personal_tenant_id, json=tenant_doc)
+                    
                     return personal_tenant_id
                 else:
                     logger.warning(f"User {user_id} has personalTenantId but it's not marked as personal: {personal_tenant_id}")
@@ -314,9 +366,6 @@ class CouchSitterService:
         logger.warning(f"Creating missing personal tenant for user: {user_id}")
         tenant_id = f"tenant_{uuid.uuid4()}"
         current_time = datetime.now(timezone.utc).isoformat()
-        
-        # Use requested DB name for applicationId, or default to couch-sitter DB name
-        app_id = requested_db_name or self.db_name
 
         tenant_doc = {
             "_id": tenant_id,
@@ -358,6 +407,10 @@ class CouchSitterService:
         Raises:
             httpx.HTTPError: If database operations fail
         """
+        # Resolve the couch-sitter application ID
+        app_doc = await self.find_application_by_db_name("couch-sitter")
+        app_id = app_doc.get("_id") if app_doc else "couch-sitter"  # Fallback to db name if not found
+        
         try:
             # Try to get existing admin tenant
             response = await self._make_request("GET", ADMIN_TENANT_ID)
@@ -379,7 +432,7 @@ class CouchSitterService:
                     "_id": ADMIN_TENANT_ID,
                     "type": "tenant",
                     "name": "Couch-Sitter Administrators",
-                    "applicationId": "couch-sitter",
+                    "applicationId": app_id,
                     "isPersonal": False,
                     "userIds": [],
                     "createdAt": current_time,
@@ -406,7 +459,7 @@ class CouchSitterService:
                     "_id": ADMIN_TENANT_ID,
                     "type": "tenant",
                     "name": "Couch-Sitter Administrators",
-                    "applicationId": "couch-sitter",
+                    "applicationId": app_id,
                     "isPersonal": False,
                     "userIds": [],
                     "createdAt": current_time,
@@ -537,6 +590,24 @@ class CouchSitterService:
                 logger.info(f"Created admin user: {user_id}")
             else:
                 user_id = user_doc["_id"]
+                
+                # FIX: Update user name and email if missing/default
+                user_updated = False
+                current_name = user_doc.get("name", "")
+                if name and (not current_name or current_name.startswith("Admin ") or current_name.startswith("User ")):
+                    logger.info(f"Updating user name from '{current_name}' to '{name}'")
+                    user_doc["name"] = name
+                    user_updated = True
+                
+                current_email = user_doc.get("email")
+                if email and not current_email:
+                    logger.info(f"Updating user email from None to '{email}'")
+                    user_doc["email"] = email
+                    user_updated = True
+                
+                if user_updated:
+                    user_doc["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                    await self._make_request("PUT", user_id, json=user_doc)
             
             # Add user to admin tenant
             await self._add_user_to_admin_tenant(user_id)
@@ -566,12 +637,74 @@ class CouchSitterService:
                 personal_tenant = next((t for t in tenants if t.get("personal", False)), None)
 
                 if not personal_tenant:
+                    # Create personal tenant for this app
+                    logger.info(f"No personal tenant found for {sub_hash}, creating one for app: {requested_db_name}")
                     personal_tenant_id = await self.ensure_personal_tenant_exists(user_doc, requested_db_name)
                     personal_tenant = {"tenantId": personal_tenant_id, "role": "owner", "personal": True}
                     tenants.append(personal_tenant)
+                    
+                    # IMPORTANT: Update user document with new tenant
+                    user_doc["tenants"] = tenants
+                    user_doc["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                    await self._make_request("PUT", user_doc["_id"], json=user_doc)
+                    logger.info(f"Updated user {user_doc['_id']} with personal tenant {personal_tenant_id}")
+                
+                # FIX: Update user name if it's a default "Admin" name and we have a better one
+                user_updated = False
+                current_name = user_doc.get("name", "")
+                if name and (not current_name or current_name.startswith("Admin ") or current_name.startswith("User ")):
+                    logger.info(f"Updating user name from '{current_name}' to '{name}'")
+                    user_doc["name"] = name
+                    user_updated = True
 
-                # For now, use personal tenant as default (active tenant selection will come later)
+                # FIX: Update user email if missing
+                current_email = user_doc.get("email")
+                if email and not current_email:
+                    logger.info(f"Updating user email from None to '{email}'")
+                    user_doc["email"] = email
+                    user_updated = True
+
+                # FIX: Update personal tenant name if it looks like a generated name
                 active_tenant_id = personal_tenant.get("tenantId", personal_tenant_id)
+                
+                if user_updated:
+                    user_doc["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                    await self._make_request("PUT", user_doc["_id"], json=user_doc)
+                
+                # Check tenant name and applicationId
+                try:
+                    tenant_response = await self._make_request("GET", active_tenant_id)
+                    tenant_doc = tenant_response.json()
+                    tenant_name = tenant_doc.get("name", "")
+                    current_app_id = tenant_doc.get("applicationId")
+                    
+                    tenant_needs_update = False
+                    
+                    # FIX: Update tenant name if it's a default "Admin" name
+                    if name and (tenant_name.startswith("Personal Tenant for") or tenant_name.startswith("Admin ")):
+                        # Extract username from email if possible for better name
+                        workspace_name = f"{name}'s Workspace"
+                        if email:
+                            username = email.split('@')[0]
+                            workspace_name = f"{username}'s Workspace"
+                            
+                        logger.info(f"Updating tenant name from '{tenant_name}' to '{workspace_name}'")
+                        tenant_doc["name"] = workspace_name
+                        tenant_needs_update = True
+
+                    # FIX: Update applicationId if it doesn't match requested app
+                    app_id = requested_db_name or self.db_name
+                    if app_id and app_id != "couch-sitter" and current_app_id != app_id:
+                        logger.info(f"Updating tenant {active_tenant_id} applicationId from '{current_app_id}' to '{app_id}'")
+                        tenant_doc["applicationId"] = app_id
+                        tenant_needs_update = True
+                    
+                    if tenant_needs_update:
+                        tenant_doc["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                        await self._make_request("PUT", active_tenant_id, json=tenant_doc)
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to check/update tenant info: {e}")
 
                 try:
                     return UserTenantInfo(
@@ -632,13 +765,14 @@ class CouchSitterService:
                 logger.error(f"Created tenant: {created_tenant}")
                 raise
 
-    async def ensure_app_exists(self, issuer: str, database_names: List[str]) -> Dict[str, Any]:
+    async def ensure_app_exists(self, issuer: str, database_names: List[str], clerk_secret_key: str = None) -> Dict[str, Any]:
         """
         Ensure an App document exists for the given issuer, creating it if necessary.
 
         Args:
             issuer: The Clerk issuer URL
             database_names: List of database names this issuer can access
+            clerk_secret_key: Clerk Secret Key for this app (optional)
 
         Returns:
             App document
@@ -663,13 +797,38 @@ class CouchSitterService:
             }
         }
 
+        # Add keys if provided
+        if clerk_secret_key:
+            app_doc["clerkSecretKey"] = clerk_secret_key
+
+
         try:
             # Try to get existing app
             response = await self._make_request("GET", app_id)
             response.raise_for_status()  # This will raise for 404 responses
             existing_app = response.json()
-            logger.info(f"App document already exists: {app_id}")
+            
+            # Check if we need to update keys
+            needs_update = False
+            if clerk_secret_key and existing_app.get("clerkSecretKey") != clerk_secret_key:
+                existing_app["clerkSecretKey"] = clerk_secret_key
+                needs_update = True
+
+            
+            # Also update database names if changed
+            if set(existing_app.get("databaseNames", [])) != set(database_names):
+                existing_app["databaseNames"] = database_names
+                needs_update = True
+
+            if needs_update:
+                existing_app["updatedAt"] = current_time
+                await self._make_request("PUT", app_id, json=existing_app)
+                logger.info(f"Updated app document: {app_id}")
+                return existing_app
+            
+            logger.info(f"App document already exists and is up to date: {app_id}")
             return existing_app
+            
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 # Create new app document
@@ -681,12 +840,18 @@ class CouchSitterService:
             else:
                 raise
 
-    async def load_all_apps(self) -> Dict[str, List[str]]:
+    async def load_all_apps(self) -> Dict[str, Dict[str, Any]]:
         """
-        Load all App documents from the database and return issuer to database mapping.
+        Load all App documents from the database and return issuer to app config mapping.
 
         Returns:
-            Dictionary mapping issuer URLs to list of database names
+            Dictionary mapping issuer URLs to app configuration dict:
+            {
+                "issuer_url": {
+                    "databaseNames": ["db1", "db2"],
+                    "clerkSecretKey": "sk_..."
+                }
+            }
 
         Raises:
             httpx.HTTPError: If database operations fail
@@ -701,7 +866,7 @@ class CouchSitterService:
                         {"type": "app"}
                     ]
                 },
-                "fields": ["issuer", "databaseNames", "name"]
+                "fields": ["issuer", "databaseNames", "name", "clerkSecretKey"]
             }
 
             response = await self._make_request("POST", "_find", json=query)
@@ -712,8 +877,13 @@ class CouchSitterService:
                 issuer = doc.get("issuer")
                 database_names = doc.get("databaseNames", [])
                 if issuer and database_names:
-                    apps[issuer] = database_names
-                    logger.info(f"Loaded app: {issuer} -> {database_names}")
+                    apps[issuer] = {
+                        "databaseNames": database_names,
+                        "clerkSecretKey": doc.get("clerkSecretKey")
+                    }
+                    # Log loaded app (masking secret key)
+                    has_key = "Yes" if doc.get("clerkSecretKey") else "No"
+                    logger.info(f"Loaded app: {issuer} -> DBs: {database_names}, Has Key: {has_key}")
 
             logger.info(f"Loaded {len(apps)} applications from database")
             return apps
@@ -745,6 +915,51 @@ class CouchSitterService:
             raise ValueError("Sub claim is required")
 
         return await self.ensure_user_exists(sub, email, name, requested_db_name)
+
+    async def get_user_tenants(self, sub: str) -> Tuple[List[Dict[str, Any]], str]:
+        """
+        Get all tenants for a user.
+
+        Args:
+            sub: Clerk sub claim
+
+        Returns:
+            Tuple of (list of tenant dicts with metadata, personal_tenant_id)
+
+        Raises:
+            ValueError: If user not found
+            httpx.HTTPError: If database operations fail
+        """
+        sub_hash = self._hash_sub(sub)
+        user_doc = await self.find_user_by_sub_hash(sub_hash)
+
+        if not user_doc:
+            raise ValueError(f"User not found for sub: {sub}")
+
+        tenant_ids = user_doc.get("tenantIds", [])
+        personal_tenant_id = user_doc.get("personalTenantId")
+        tenants = []
+
+        for tenant_id in tenant_ids:
+            try:
+                response = await self._make_request("GET", tenant_id)
+                tenant_doc = response.json()
+                
+                tenants.append({
+                    "tenantId": tenant_id,
+                    "name": tenant_doc.get("name", f"Tenant {tenant_id}"),
+                    "role": "owner" if tenant_doc.get("isPersonal") else "member",
+                    "personal": tenant_doc.get("isPersonal", False),
+                    "applicationId": tenant_doc.get("applicationId")
+                })
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    logger.warning(f"Tenant {tenant_id} not found for user {user_doc['_id']}")
+                else:
+                    logger.error(f"Error fetching tenant {tenant_id}: {e}")
+
+        return tenants, personal_tenant_id
+
 
     async def create_user_with_personal_tenant_multi_tenant(self, sub: str, email: str = None, name: str = None, requested_db_name: str = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """

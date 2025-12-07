@@ -50,7 +50,7 @@ class TestClerkAPIIntegration:
         try:
             service = ClerkService()
             # Test that we can actually initialize the real Clerk SDK
-            assert service.clerk_client is not None
+            assert len(service.clients) > 0
             assert service.is_configured() is True
         except Exception as e:
             pytest.skip(f"Clerk API not available: {e}")

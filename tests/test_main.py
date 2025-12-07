@@ -75,7 +75,7 @@ class TestProxyEndpoint:
         with patch('couchdb_jwt_proxy.main.verify_clerk_jwt') as mock_verify, \
              patch('couchdb_jwt_proxy.main.couch_sitter_service') as mock_couch_sitter, \
              patch('couchdb_jwt_proxy.main.clerk_service') as mock_clerk_service, \
-             patch('couchdb_jwt_proxy.main.APPLICATIONS', {"https://test-clerk-instance.clerk.accounts.dev": ["_all_dbs", "roady", "couch-sitter"]}):
+             patch('couchdb_jwt_proxy.main.APPLICATIONS', {"https://test-clerk-instance.clerk.accounts.dev": ["_all_dbs", "couch-sitter"]}):
 
             mock_verify.return_value = (mock_clerk_jwt_payload, None)
 
@@ -262,7 +262,7 @@ class TestClerkJWTValidation:
         with patch('couchdb_jwt_proxy.main.verify_clerk_jwt') as mock_verify, \
              patch('couchdb_jwt_proxy.main.couch_sitter_service') as mock_couch_sitter, \
              patch('couchdb_jwt_proxy.main.clerk_service') as mock_clerk_service, \
-             patch('couchdb_jwt_proxy.main.APPLICATIONS', {"https://test-clerk-instance.clerk.accounts.dev": ["_all_dbs", "roady", "couch-sitter"]}):
+             patch('couchdb_jwt_proxy.main.APPLICATIONS', {"https://test-clerk-instance.clerk.accounts.dev": ["_all_dbs", "couch-sitter"]}):
 
             mock_verify.return_value = (mock_clerk_jwt_payload, None)
 

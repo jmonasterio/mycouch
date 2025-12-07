@@ -262,8 +262,8 @@ class TestCouchSitterService:
         assert len(result) == 2
         assert "https://test1.clerk.accounts.dev" in result
         assert "https://test2.clerk.accounts.dev" in result
-        assert result["https://test1.clerk.accounts.dev"] == ["roady"]
-        assert result["https://test2.clerk.accounts.dev"] == ["couch-sitter"]
+        assert result["https://test1.clerk.accounts.dev"]["databaseNames"] == ["roady"]
+        assert result["https://test2.clerk.accounts.dev"]["databaseNames"] == ["couch-sitter"]
 
     @pytest.mark.asyncio
     async def test_get_user_tenant_info(self, couch_sitter_service):
@@ -607,7 +607,7 @@ class TestCouchSitterServiceIntegration:
 
             assert isinstance(apps, dict)
             assert issuer in apps
-            assert apps[issuer] == database_names
+            assert apps[issuer]["databaseNames"] == database_names
 
 
 if __name__ == "__main__":

@@ -56,7 +56,7 @@ class TestLegacyAppSupport:
             
             assert "https://legacy-issuer.clerk.accounts.dev" in apps
             assert "https://new-issuer.clerk.accounts.dev" in apps
-            assert apps["https://legacy-issuer.clerk.accounts.dev"] == ["legacy-db"]
+            assert apps["https://legacy-issuer.clerk.accounts.dev"]["databaseNames"] == ["legacy-db"]
 
     async def test_access_with_legacy_app(self, async_client):
         """Test access to a database defined in a legacy app"""
@@ -67,7 +67,7 @@ class TestLegacyAppSupport:
         with patch('couchdb_jwt_proxy.main.verify_clerk_jwt') as mock_verify, \
              patch('couchdb_jwt_proxy.main.couch_sitter_service') as mock_couch_sitter, \
              patch('couchdb_jwt_proxy.main.clerk_service') as mock_clerk_service, \
-             patch('couchdb_jwt_proxy.main.APPLICATIONS', {legacy_issuer: ["legacy-db"]}):
+             patch('couchdb_jwt_proxy.main.APPLICATIONS', {legacy_issuer: {"databaseNames": ["legacy-db"], "clerkSecretKey": None}}):
 
             # Mock JWT
             mock_verify.return_value = ({

@@ -44,7 +44,7 @@ def mock_services(memory_dal):
         mock_clerk_class.return_value = mock_clerk_client
 
         clerk_service = ClerkService()
-        clerk_service.clerk_client = mock_clerk_client
+        clerk_service.clients["https://test-clerk.clerk.accounts.dev"] = mock_clerk_client
 
         couch_sitter_service = CouchSitterService(
             couch_sitter_db_url="http://localhost:5984/test-db",
@@ -241,7 +241,7 @@ class TestServiceIntegration:
         assert result is None
 
         # Test Clerk service when not configured
-        clerk_service.clerk_client = None
+        clerk_service.clients.clear()
         session_result = await clerk_service.verify_session_token("token")
         assert session_result is None
 
