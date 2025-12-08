@@ -85,6 +85,11 @@ class TestJWTTemplateValidation:
             
             mock_clerk.get_user_from_jwt = AsyncMock(return_value=valid_user_info)
             
+            # Mock get_user_tenant_info to return valid user info
+            mock_user_tenant = Mock()
+            mock_user_tenant.user_id = "user_123"
+            mock_cs.get_user_tenant_info = AsyncMock(return_value=mock_user_tenant)
+            
             # User only has access to tenant_xyz
             mock_cs.get_user_tenants = AsyncMock(return_value=(
                 [{"tenantId": "tenant_xyz"}],  # Only this tenant
@@ -235,7 +240,7 @@ class TestJWTTemplateConfigurationWarnings:
             assert result["success"] is True
             # Check that info about JWT template verification was logged
             records = caplog.records
-            assert any("JWT template" in r.message.lower() for r in records)
+            assert any("jwt template" in r.getMessage().lower() for r in records)
 
 
 class TestComplianceWithSecurityReview:
