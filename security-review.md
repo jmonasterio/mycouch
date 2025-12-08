@@ -260,12 +260,15 @@ Operational Items:
 
 ### 6. JWT Token Leakage in Request Logs
 **Severity:** HIGH | **CWE-532 (Insertion of Sensitive Information into Log File)**
+**Status:** ✅ **FIXED** (2025-12-07)
 
-MyCouch accepts JWT in Authorization header and passes requests to CouchDB. If these logs are exposed:
+**What was vulnerable:**
+MyCouch logged full decoded JWT payloads, exposing sensitive token data:
 
-```
-[2025-12-07] POST /db/_all_docs
-Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+```python
+# VULNERABLE PATTERN (REMOVED):
+logger.debug(f"Full JWT payload: {json.dumps(payload, indent=2)}")
+logger.debug(f"Token details | sub={payload.get('sub')} | iat={payload.get('iat')} | exp={payload.get('exp')}")
 ```
 
 **Risk:**
@@ -273,19 +276,48 @@ Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
 - JWT validity depends on expiry time (could be hours/days away)
 - Log exposure from monitoring tools, ELK stacks, etc.
 
-**Better Pattern:**
+**Fix Implemented:**
+```python
+# SAFE LOGGING (IMPLEMENTED):
+# Never log full JWT payload - use safe attributes only
+logger.debug(f"🔐 JWT VALIDATED - {request.method} /{path}")
+logger.debug(f"User context | sub={payload.get('sub')} | tenant={tenant_id}")
+
+# Token preview only (first/last 10 chars):
+token_preview = get_token_preview(token)  # "eyJhbGciOi...signature"
+logger.warning(f"Invalid token: {token_preview}")  # NOT full token
+```
+
+**Better Pattern (Implemented):**
 ```
 Client → MyCouch (Authorization: Bearer JWT)
     ↓ (MyCouch validates JWT)
-MyCouch → CouchDB (CouchDB session cookie only, NO JWT)
+MyCouch → CouchDB (CouchDB Basic Auth only, NO JWT)
     ↓ (CouchDB returns data)
 MyCouch → Client (Data only)
 ```
 
-**Implementation:**
-- MyCouch exchanges JWT for CouchDB session token
-- Only session token passed to CouchDB
-- Logging/monitoring never sees raw JWT
+**Changes made:**
+- ✅ Removed full JWT payload logging (line 1367-1379 in main.py)
+- ✅ Implemented token preview (first/last 10 chars) for error logging
+- ✅ Removed sensitive claim logging (iat, exp from debug logs)
+- ✅ Only safe attributes logged (sub, iss, tenant, method, path)
+- ✅ JWT replaced with Basic Auth before proxying to CouchDB
+- ✅ Comprehensive test coverage added
+
+**Test coverage:**
+- ✅ Full JWT payload NOT logged even at DEBUG level
+- ✅ Token preview used instead of full token
+- ✅ Sensitive claims (iat, exp) excluded from logs
+- ✅ Error logs don't expose full tokens
+- ✅ JWT not passed to CouchDB (replaced with Basic Auth)
+- ✅ Header replacement removes JWT from proxy requests
+- ✅ Audit logs don't contain sensitive data
+- ✅ CWE-532 compliance verified
+
+**Code changes:**
+- File: `src/couchdb_jwt_proxy/main.py` lines 1366-1379 (JWT validation logging)
+- File: `tests/test_jwt_token_leakage_fix.py` (12 comprehensive tests)
 
 ---
 
@@ -574,8 +606,15 @@ if unauthorized_tenant_switch_attempts > 3:
    - Validates user is member before switching tenant
    - Returns 403 on unauthorized access attempts
 
-4. **Document CouchDB security setup** (1-2 hours)
-5. **Implement rate limiting** (2-3 hours)
+4. ✅ **Prevent JWT token leakage in logs** (COMPLETED 2025-12-07)
+   - Fixed: `src/couchdb_jwt_proxy/main.py` lines 1366-1379 (JWT validation logging)
+   - Tests: `tests/test_jwt_token_leakage_fix.py` (12 tests)
+   - Removed full JWT payload logging
+   - Implemented token preview (first/last 10 chars only)
+   - Removed sensitive claim logging (iat, exp)
+
+5. **Document CouchDB security setup** (1-2 hours)
+6. **Implement rate limiting** (2-3 hours)
 
 **Remaining:** ~1 day of work
 

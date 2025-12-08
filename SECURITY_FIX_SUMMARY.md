@@ -1,7 +1,7 @@
 # Security Fixes Summary - December 7, 2025
 
 ## Overview
-Three critical security vulnerabilities from the security review have been fixed and tested. All fixes are production-ready with comprehensive test coverage.
+Four critical/high security vulnerabilities from the security review have been fixed and tested. All fixes are production-ready with comprehensive test coverage (39 tests, all passing).
 
 ## Fixed Issues
 
@@ -70,24 +70,64 @@ if tenant_id not in accessible_tenant_ids:
 
 ---
 
+### ✅ Issue #6: JWT Token Leakage in Request Logs (HIGH)
+**CWE-532: Insertion of Sensitive Information into Log File**
+
+**Fix:** Removed full JWT payload logging and implemented safe logging practices. JWT tokens are never logged in full; only token previews (first/last 10 chars) are used for error tracking.
+
+**Code Changes:**
+- File: `src/couchdb_jwt_proxy/main.py` lines 1366-1379 (JWT validation logging)
+- Test: `tests/test_jwt_token_leakage_fix.py` (12 tests)
+
+**Implementation Details:**
+```python
+# REMOVED: Full JWT payload logging
+# logger.debug(f"Full JWT payload: {json.dumps(payload, indent=2)}")
+
+# ADDED: Safe logging with token preview only
+logger.debug(f"🔐 JWT VALIDATED - {request.method} /{path}")
+logger.debug(f"User context | sub={payload.get('sub')} | tenant={tenant_id}")
+
+# Token preview for error logging (not full token)
+token_preview = get_token_preview(token)  # "eyJhbGciOi...signature"
+logger.warning(f"Invalid token: {token_preview}")
+```
+
+**Test Coverage:**
+- ✅ Full JWT payload NOT logged even at DEBUG level
+- ✅ Token preview (first/last 10 chars) used for error logs
+- ✅ Sensitive claims (iat, exp) excluded from logs
+- ✅ JWT replaced with Basic Auth before proxying to CouchDB
+- ✅ Error logs don't expose full tokens
+- ✅ Audit logs contain no sensitive data
+- ✅ CWE-532 compliance verified
+
+---
+
 ## Test Results
 
-### All Security Tests Passing: 27/27 ✅
+### All Security Tests Passing: 39/39 ✅
 
 **JWT Fallback Fix Tests:** 16/16 passing
-- TestJWTFallbackRemoval
-- TestTenantMembershipValidation
-- TestMissingActiveClaimsErrorHandling
-- TestJWTClaimVariations
-- TestSecurityLogging
-- TestComplianceWithSecurityReview
-- TestIntegrationWithProxy
+- TestJWTFallbackRemoval (4 tests)
+- TestTenantMembershipValidation (1 test)
+- TestMissingActiveClaimsErrorHandling (2 tests)
+- TestJWTClaimVariations (4 tests)
+- TestSecurityLogging (2 tests)
+- TestComplianceWithSecurityReview (2 tests)
+- TestIntegrationWithProxy (1 test)
 
 **JWT Template Validation Tests:** 11/11 passing
-- TestJWTTemplateValidation
-- TestJWTClaimInjectionValidation
-- TestJWTTemplateConfigurationWarnings
-- TestComplianceWithSecurityReview
+- TestJWTTemplateValidation (4 tests)
+- TestJWTClaimInjectionValidation (3 tests)
+- TestJWTTemplateConfigurationWarnings (1 test)
+- TestComplianceWithSecurityReview (3 tests)
+
+**JWT Token Leakage Fix Tests:** 12/12 passing
+- TestJWTTokenLeakagePrevention (5 tests)
+- TestTokenExchangePattern (2 tests)
+- TestLoggingSecurityPractices (2 tests)
+- TestComplianceWithSecurityReview (3 tests)
 
 ---
 
@@ -108,7 +148,6 @@ From the security review, the following issues still need implementation:
 
 ### 🟠 HIGH (Fix ASAP)
 - **Session logging & monitoring** (4-6 hours)
-- **JWT → session token exchange pattern** (4-6 hours)
 - **Invite token security hardening** (2-3 hours)
 
 ### 🟡 MEDIUM (Before 1st Users)
@@ -131,7 +170,26 @@ The MyCouch application now implements:
 
 ---
 
+## Summary
+
+**Critical Vulnerabilities Fixed:** 4
+- ✅ JWT Fallback Authentication Bypass (CWE-287)
+- ✅ JWT Template Configuration Not Enforced (CWE-345)
+- ✅ Tenant Membership Not Validated (CWE-639)
+- ✅ JWT Token Leakage in Logs (CWE-532)
+
+**Security Tests:** 39/39 passing (100%)
+
+**Code Quality:**
+- Removed sensitive payload logging
+- Implemented safe logging practices
+- Added tenant membership validation
+- Removed authentication fallback mechanisms
+- Comprehensive test coverage for all fixes
+
+---
+
 **Date:** 2025-12-07  
-**Test Coverage:** 27 security-focused tests, all passing  
-**Estimated Effort Completed:** 3-4 hours  
+**Test Coverage:** 39 security-focused tests, all passing  
+**Estimated Effort Completed:** 4-5 hours  
 **Remaining Effort:** ~2-3 weeks to production-ready

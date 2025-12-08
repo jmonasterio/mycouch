@@ -1363,20 +1363,16 @@ async def proxy_couchdb(
     # Determine application type for conditional tenant enforcement (moved up for logging)
     is_roady_app = is_roady_application(path, payload)
 
-    # Always log the full decoded JWT payload for debugging
-    logger.debug(f"🔐 JWT DECODED PAYLOAD - {request.method} /{path}")
-    logger.debug(f"Full JWT payload: {json.dumps(payload, indent=2)}")
-
-    # Log the issuer and database being accessed
+    # SECURITY: Never log full JWT payload (CWE-532)
+    # Instead log only safe, non-sensitive attributes
+    logger.debug(f"🔐 JWT VALIDATED - {request.method} /{path}")
     logger.debug(f"🎯 JWT Issuer: {payload.get('iss')}")
     logger.debug(f"🗄️ Target Database: {db_name}")
-
-    # Also log application detection
     logger.debug(f"📱 Application detected: {'🚗 ROADY' if is_roady_app else '🛋️ COUCH-SITTER'}")
 
-    # Debug level: log specific token details
+    # Safe logging: only log non-sensitive claim information
     if logger.level <= logging.DEBUG:
-        logger.debug(f"Token details | sub={payload.get('sub')} | iat={payload.get('iat')} | exp={payload.get('exp')}")
+        logger.debug(f"User context | sub={payload.get('sub')} | tenant={tenant_id}")
 
     logger.debug(log_msg)
 
