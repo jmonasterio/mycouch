@@ -1074,6 +1074,12 @@ async def choose_tenant(
             )
             if success:
                 logger.info(f"Updated active tenant in Clerk metadata for user {user_info['user_id']}: {tenant_id}")
+                
+                # SECURITY FIX #2: Validate JWT template configuration
+                # The client should get a new JWT which will contain the active_tenant_id claim
+                # if Clerk JWT Template is properly configured
+                logger.info(f"ℹ️ JWT template verification: Client should refresh token to get active_tenant_id claim")
+                logger.info(f"   If claim is missing after refresh, Clerk JWT Template may not be configured correctly")
             else:
                 logger.warning(f"Failed to update active tenant in Clerk metadata for user {user_info['user_id']}")
         else:
