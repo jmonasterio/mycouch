@@ -18,6 +18,7 @@ dependencies = [
     "python-dotenv",
     "pydantic",
     "clerk-backend-api",  # Clerk Backend API for session management
+    "slowapi>=0.1.5",  # Rate limiting library
 ]
 
 [project.optional-dependencies]

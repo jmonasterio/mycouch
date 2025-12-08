@@ -138,6 +138,26 @@ Added `asyncio` marker to pytest configuration to support async test execution.
 
 ---
 
+## Issue #7: Session Timeout Strategy - CLARIFIED ✅
+
+**Status:** Server-side already correct, client-side is application responsibility
+
+MyCouch correctly handles JWT expiration:
+- ✅ Validates JWT signature (RS256 with Clerk JWKS)
+- ✅ Checks token expiration (exp claim)
+- ✅ Returns 401 Unauthorized if expired
+- ✅ Logs validation failures safely (no token exposure)
+
+**What was clarified:**
+- Created `docs/JWT_SESSION_ARCHITECTURE.md` explaining responsibilities
+- Documented that client (not server) should refresh tokens
+- Provided client-side implementation examples
+- Explained why server-side refresh is anti-pattern
+
+**No code changes needed** - architecture is already correct.
+
+---
+
 ## Remaining High-Priority Issues
 
 From the security review, the following issues still need implementation:

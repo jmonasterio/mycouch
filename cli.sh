@@ -24,7 +24,7 @@ echo "Starting proxy..."
 uv run uvicorn couchdb_jwt_proxy.main:app \
     --host $PROXY_HOST \
     --port $PROXY_PORT \
-    --timeout-graceful-shutdown 2 \
+    --timeout-graceful-shutdown 1 \
     --access-log \
     --reload \
     --reload-dir src

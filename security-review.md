@@ -2,7 +2,29 @@
 
 **Date:** 2025-12-07  
 **Reviewer:** Security Specialist Analysis  
-**Status:** Critical Issues Identified  
+**Status:** 5 of 11 Issues Completed/Clarified
+
+---
+
+## 📌 Important: Client vs Server Responsibilities
+
+**See:** `SECURITY_REVIEW_MYCOUCH_ONLY.md` for MyCouch server-side work only.
+
+This document includes both server-side and client-side recommendations. Many frontend applications will implement this separately. To avoid duplication:
+
+**🔵 MyCouch Server-Side Only:** `SECURITY_REVIEW_MYCOUCH_ONLY.md`
+- JWT validation ✅
+- Rate limiting ⏳
+- Audit logging ⏳
+- CouchDB configuration ⏳
+- Personal tenant protection ⏳
+
+**⚪ Client-Side Responsibility (Not MyCouch):**
+- Token refresh (Session Timeout #7)
+- CSRF protection (#9)
+- Race condition handling (#10)
+- Invite token UI (#8)
+- See `docs/JWT_SESSION_ARCHITECTURE.md` for client-side patterns
 
 ---
 
@@ -323,28 +345,91 @@ MyCouch → Client (Data only)
 
 ### 7. No Documented Session Timeout Strategy
 **Severity:** MEDIUM-HIGH | **CWE-613 (Insufficient Session Expiration)**
+**Status:** ✅ **PARTIALLY APPLICABLE** (Server-side: DONE, Client-side: CLIENT RESPONSIBILITY)
 
-From documentation: "Clerk sessions typically last 7 days"
+**Context:**
+The security review conflates client-side and server-side responsibilities. Clerk's JWT architecture requires clear separation:
+- **Server (MyCouch):** Validate JWT expiration, return 401 if expired
+- **Client:** Refresh tokens before expiry, handle 401 responses
 
-**Gaps:**
-- ❌ No mention of token refresh mechanics in MyCouch
-- ❌ Offline users could have stale/expired tokens
-- ❌ No graceful error handling when token expires
-- ❌ No forced re-authentication after inactivity
-
-**Required Implementation:**
+**What MyCouch Already Does ✅**
 ```python
-# Track token expiration
-def extract_token_expiry(token: str) -> datetime:
-    payload = jwt.decode(token)
-    return datetime.fromtimestamp(payload['exp'])
+# Line 261-277 in src/couchdb_jwt_proxy/main.py
+except jwt.ExpiredSignatureError as e:
+    logger.warning(f"JWT token has expired: {e}")
+    return None, "clerk_token_expired"
 
-# Implement refresh before expiry
-async def refresh_jwt_if_needed():
-    if token_expires_in_next(minutes=5):
-        new_token = await clerk_api.refresh_token()
-        store_token(new_token)
+# Returns 401 to client (line 434-435)
+raise HTTPException(
+    status_code=401, 
+    detail="Invalid or expired token (clerk_token_expired)"
+)
 ```
+
+**MyCouch Server Responsibilities ✅**
+- ✅ Validate JWT signature (RS256 with Clerk JWKS)
+- ✅ Check token expiration (exp claim)
+- ✅ Return 401 Unauthorized if expired
+- ✅ Log validation failures without exposing token
+- ✅ Verify tenant membership (active_tenant_id claim)
+
+**Client Application Responsibilities** (NOT MyCouch)
+- ❌ Refresh token BEFORE expiry (5 min buffer)
+- ❌ Store token securely
+- ❌ Handle 401 responses
+- ❌ Implement inactivity timeout
+- ❌ Redirect to login on session failure
+
+**Documentation:**
+- ✅ Created `docs/JWT_SESSION_ARCHITECTURE.md` explaining:
+  - Token lifecycle and responsibility boundaries
+  - How Clerk session works (7 days by default)
+  - Client-side token refresh implementation
+  - Handling 401 unauthorized responses
+  - Inactivity timeout patterns
+  - Troubleshooting guide
+
+**Why Server-side Refresh is WRONG:**
+```python
+# ❌ ANTI-PATTERN: Server trying to refresh
+async def verify_clerk_jwt_with_refresh(token):
+    try:
+        payload = jwt.decode(token, ...)
+    except jwt.ExpiredSignatureError:
+        # ❌ WRONG: Server doesn't refresh tokens
+        new_token = await clerk_api.refresh_token()
+        payload = jwt.decode(new_token, ...)
+    return payload
+```
+
+**Why:** 
+- Stateless REST principle violated (server maintains state)
+- Race conditions in concurrent requests
+- Server can't trust its own token store
+- Client loses control of token lifecycle
+- CMS/monitoring tools can't track token usage
+
+**Correct Pattern:**
+```
+Client sends expired token to MyCouch
+    ↓
+MyCouch returns 401 Unauthorized
+    ↓
+Client catches 401 and calls Clerk API to refresh
+    ↓
+Clerk returns new token (or 401 if session expired)
+    ↓
+Client retries request with new token
+```
+
+**Code Changes:**
+- File: `docs/JWT_SESSION_ARCHITECTURE.md` (new comprehensive guide)
+- No changes to `src/couchdb_jwt_proxy/main.py` (already correct)
+
+**Action Items:**
+- ✅ Document responsibility boundaries
+- ✅ Provide client-side implementation examples
+- ❌ Do NOT implement server-side token refresh (wrong architecture)
 
 ---
 
@@ -613,16 +698,22 @@ if unauthorized_tenant_switch_attempts > 3:
    - Implemented token preview (first/last 10 chars only)
    - Removed sensitive claim logging (iat, exp)
 
-5. **Document CouchDB security setup** (1-2 hours)
-6. **Implement rate limiting** (2-3 hours)
+5. ✅ **Document session/token architecture** (COMPLETED 2025-12-07)
+   - Created: `docs/JWT_SESSION_ARCHITECTURE.md`
+   - Clarified client vs server responsibilities
+   - MyCouch correctly validates JWT expiration (returns 401)
+   - Client handles token refresh before expiry
+   - No code changes needed (already correct)
+
+6. **Document CouchDB security setup** (1-2 hours)
+7. **Implement rate limiting** (2-3 hours)
 
 **Remaining:** ~1 day of work
 
 ### 🟠 HIGH (Fix ASAP)
 
-6. **Session logging & monitoring** (4-6 hours)
-7. **Token exchange pattern** (4-6 hours)
-8. **Invite token security hardening** (2-3 hours)
+8. **Session logging & monitoring** (4-6 hours)
+9. **Invite token security hardening** (2-3 hours)
 
 **Total:** ~1 week of work
 

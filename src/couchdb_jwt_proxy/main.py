@@ -13,15 +13,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import uvicorn
 from dotenv import load_dotenv
 from urllib.parse import parse_qsl
 
 # Import user/tenant management modules
 from .user_tenant_cache import get_cache
-from .couch_sitter_service import CouchSitterService
+from .couch_sitter_service import CouchSitterService, ADMIN_TENANT_ID
 from .clerk_service import ClerkService
 from .dal import create_dal
+from .auth_log_service import AuthLogService
 
 # Load environment variables
 load_dotenv()
@@ -33,6 +37,7 @@ COUCHDB_PASSWORD = os.getenv("COUCHDB_PASSWORD")
 PROXY_HOST = os.getenv("PROXY_HOST")
 PROXY_PORT = os.getenv("PROXY_PORT")
 LOG_LEVEL = os.getenv("LOG_LEVEL")
+COUCH_SITTER_LOG_DB_URL = os.getenv("COUCH_SITTER_LOG_DB_URL")
 
 # Default application configuration (will be loaded from database at startup)
 APPLICATIONS: Dict[str, Dict[str, Any]] = {}
@@ -136,8 +141,11 @@ CLERK_ISSUER_URL = CLERK_ISSUER_URL.rstrip("/")
 COUCH_SITTER_DB_URL = COUCH_SITTER_DB_URL.rstrip("/")
 CLERK_JWKS_URL = f"{CLERK_ISSUER_URL}/.well-known/jwks.json"
 
-# Setup logging
-logging.basicConfig(level=LOG_LEVEL)
+# Setup logging with timing
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format='%(relativeCreated)5dms %(name)s:%(levelname)s:%(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Reduce httpx logging verbosity
@@ -164,6 +172,19 @@ clerk_service = ClerkService(
     secret_key=CLERK_SECRET_KEY,
     issuer_url=CLERK_ISSUER_URL
 )
+
+# Initialize Auth Log Service (optional - only if log database URL is configured)
+auth_log_service = None
+if COUCH_SITTER_LOG_DB_URL:
+    auth_log_service = AuthLogService(
+        log_db_url=COUCH_SITTER_LOG_DB_URL,
+        couchdb_user=COUCHDB_USER,
+        couchdb_password=COUCHDB_PASSWORD
+    )
+    logger.info(f"Initialized AuthLogService for: {COUCH_SITTER_LOG_DB_URL}")
+    # Note: Database will be created automatically on first log write
+else:
+    logger.warning("COUCH_SITTER_LOG_DB_URL not configured - auth logging disabled")
 
 logger.info(f"Initialized user cache (TTL: {USER_CACHE_TTL_SECONDS}s)")
 logger.info(f"Initialized CouchSitter service for: {COUCH_SITTER_DB_URL}")
@@ -786,6 +807,9 @@ async def lifespan(app: FastAPI):
     # Shutdown (if needed in the future)
     logger.info("Shutting down CouchDB JWT Proxy")
 
+# Rate Limiting (CWE-770: No Rate Limiting on Auth Endpoints)
+limiter = Limiter(key_func=get_remote_address)
+
 # FastAPI Application
 app = FastAPI(
     title="CouchDB JWT Proxy",
@@ -793,6 +817,27 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Add rate limiter to app state for middleware
+app.state.limiter = limiter
+
+# Startup event to ensure log database exists
+@app.on_event("startup")
+async def startup_event():
+    """Ensure auth log database exists on startup"""
+    logger.info("[Startup] Starting up...")
+    if auth_log_service:
+        logger.info(f"[Startup] Ensuring auth log database exists at: {COUCH_SITTER_LOG_DB_URL}")
+        try:
+            success = await auth_log_service.ensure_database_exists()
+            if success:
+                logger.info("[Startup] Auth log database ready")
+            else:
+                logger.error("[Startup] Failed to create or verify auth log database - logging may not work")
+        except Exception as e:
+            logger.error(f"[Startup] Exception while ensuring database: {e}", exc_info=True)
+    else:
+        logger.info("[Startup] Auth log service not configured")
 
 # Add CORS middleware
 app.add_middleware(
@@ -802,6 +847,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add rate limit error handler
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Handle rate limit exceeded errors"""
+    logger.warning(f"Rate limit exceeded for {request.client.host}: {exc.detail}")
+    return Response(
+        content=json.dumps({
+            "detail": "Too many requests. Please try again later.",
+            "error": "rate_limit_exceeded"
+        }),
+        status_code=429,
+        media_type="application/json"
+    )
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -844,6 +903,7 @@ async def initialize_applications():
 
 # Tenant Management Endpoints
 @app.get("/my-tenants")
+@limiter.limit("30/minute")
 async def get_my_tenants(
     request: Request,
     authorization: Optional[str] = Header(None)
@@ -958,6 +1018,18 @@ Clerk Dashboard → Sessions → Customize session token
         # Get all tenants for this user (not just personal tenant)
         tenants, personal_tenant_id = await couch_sitter_service.get_user_tenants(user_info["sub"])
 
+        # Log successful login event
+        if auth_log_service:
+            import asyncio
+            asyncio.create_task(auth_log_service.log_login(
+                user_id=user_info["user_id"],
+                tenant_id=user_tenant_info.tenant_id,
+                success=True,
+                ip=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+                issuer=user_info.get("iss")
+            ))
+
         # VALIDATION: Filter tenants for this application
         # If no requested_db_name, we might want to return all, but for safety in roady context, 
         # let's be strict if we know we are in an app context.
@@ -1018,6 +1090,7 @@ Clerk Dashboard → Sessions → Customize session token
 
 
 @app.post("/choose-tenant")
+@limiter.limit("10/minute")
 async def choose_tenant(
     request: Request,
     tenant_request: Dict[str, str],
@@ -1156,6 +1229,222 @@ async def get_active_tenant(
         raise HTTPException(status_code=500, detail="Failed to get active tenant")
 
 # Public endpoints (must be defined before catch-all route)
+@app.get("/admin/auth-logs")
+async def get_auth_logs(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    user_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    action: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0
+):
+    """
+    Get authentication logs from couch-sitter-log database.
+    
+    Query parameters:
+    - user_id: Filter by user ID
+    - tenant_id: Filter by tenant ID
+    - action: Filter by action type (login, tenant_switch, access_denied, rate_limited, token_validation, auth_request)
+    - status: Filter by status (success, failed)
+    - limit: Number of results to return (default 100, max 1000)
+    - skip: Number of results to skip for pagination (default 0)
+    """
+    if not auth_log_service:
+        raise HTTPException(status_code=503, detail="Auth logging not configured")
+    
+    # Validate authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    try:
+        import time
+        start = time.time()
+        logger.info(f"[auth-logs] Request started")
+        
+        # Verify JWT to ensure user is authenticated
+        token = authorization[7:]
+        jwt_start = time.time()
+        payload, error_reason = verify_clerk_jwt(token)
+        logger.info(f"[auth-logs] JWT verification took {(time.time() - jwt_start)*1000:.0f}ms")
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
+        # TODO: Add admin role check once roles are implemented
+        # For now, any authenticated user can view logs (consider restricting to admins)
+        
+        # Build query to fetch logs from CouchDB
+        # Using _find endpoint to query logs with filters
+        # Note: No sorting - CouchDB requires indexes for sorting that we may not have
+        # Sorting can be done on the client side if needed
+        # Build view query using Map/Reduce instead of Mango for better performance
+        view_url = f"{auth_log_service.db_url}/_design/auth_logs/_view/"
+        
+        if action and status:
+            view_name = "by_action_status_timestamp"
+            startkey = json.dumps([action, status, ""])
+            endkey = json.dumps([action, status, "\uffff"])
+        elif action:
+            view_name = "by_action_timestamp"
+            startkey = json.dumps([action, ""])
+            endkey = json.dumps([action, "\uffff"])
+        elif status:
+            view_name = "by_status_timestamp"
+            startkey = json.dumps([status, ""])
+            endkey = json.dumps([status, "\uffff"])
+        else:
+            view_name = "by_timestamp"
+            startkey = json.dumps("")
+            endkey = json.dumps("\uffff")
+        
+        view_url = f"{view_url}{view_name}?include_docs=true&descending=true&startkey={endkey}&endkey={startkey}&limit={min(limit, 1000)}&skip={skip}"
+        
+        logger.info(f"[auth-logs] Querying view: {view_url}")
+        
+        # Execute query via httpx directly to log database
+        async with httpx.AsyncClient() as client:
+            headers = auth_log_service.auth_headers.copy()
+            
+            response = await client.get(view_url, headers=headers)
+            
+            logger.info(f"[auth-logs] Response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                logger.error(f"[auth-logs] Failed to query auth logs: {response.status_code}")
+                logger.error(f"[auth-logs] Response body: {response.text}")
+                raise HTTPException(status_code=500, detail="Failed to retrieve logs")
+            
+            result = response.json()
+            # Convert view rows to docs format
+            docs = [row.get("doc") for row in result.get("rows", []) if row.get("doc")]
+            logger.info(f"[auth-logs] Results: {len(docs)} docs returned")
+            logger.info(f"[auth-logs] Total request time: {(time.time() - start)*1000:.0f}ms")
+            return {
+                "docs": docs,
+                "bookmark": None,
+                "execution_stats": None
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving auth logs: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/admin/auth-logs/stats")
+async def get_auth_logs_stats(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    days: int = 7,
+    action: Optional[str] = None,
+    status: Optional[str] = None
+):
+    """
+    Get authentication logs statistics.
+    
+    Returns summary stats for the past N days:
+    - Total requests
+    - Successful logins
+    - Failed authentications
+    - Rate limit events
+    - Requests by action type
+    - Requests by status
+    """
+    if not auth_log_service:
+        raise HTTPException(status_code=503, detail="Auth logging not configured")
+    
+    # Validate authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    try:
+        # Verify JWT to ensure user is authenticated
+        token = authorization[7:]
+        payload, error_reason = verify_clerk_jwt(token)
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
+        # TODO: Add admin role check once roles are implemented
+        
+        # Calculate date range
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        start_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        # Build query for logs within date range
+        query = {
+            "selector": {
+                "type": "auth_event",
+                "date": {
+                    "$gte": start_date
+                }
+            },
+            "limit": 10000
+        }
+        
+        # Add filters if provided
+        if action:
+            query["selector"]["action"] = action
+        if status:
+            query["selector"]["status"] = status
+        
+        # Fetch all logs for the period
+        async with httpx.AsyncClient() as client:
+            headers = auth_log_service.auth_headers.copy()
+            headers["Content-Type"] = "application/json"
+            
+            response = await client.post(
+                f"{auth_log_service.db_url}/_find",
+                json=query,
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to query auth logs for stats: {response.status_code} {response.text}")
+                raise HTTPException(status_code=500, detail="Failed to retrieve stats")
+            
+            result = response.json()
+            docs = result.get("docs", [])
+            
+            # Calculate statistics
+            stats = {
+                "period_days": days,
+                "total_events": len(docs),
+                "by_action": {},
+                "by_status": {},
+                "successful_logins": 0,
+                "failed_authentications": 0,
+                "rate_limit_events": 0,
+                "unique_users": len(set(doc.get("user_id") for doc in docs if doc.get("user_id"))),
+                "unique_tenants": len(set(doc.get("tenant_id") for doc in docs if doc.get("tenant_id"))),
+                "unique_ips": len(set(doc.get("ip") for doc in docs if doc.get("ip")))
+            }
+            
+            # Aggregate by action and status
+            for doc in docs:
+                action = doc.get("action", "unknown")
+                status = doc.get("status", "unknown")
+                
+                stats["by_action"][action] = stats["by_action"].get(action, 0) + 1
+                stats["by_status"][status] = stats["by_status"].get(status, 0) + 1
+                
+                # Count specific events
+                if action == "login" and status == "success":
+                    stats["successful_logins"] += 1
+                elif status == "failed":
+                    stats["failed_authentications"] += 1
+                elif action == "rate_limited":
+                    stats["rate_limit_events"] += 1
+            
+            return stats
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving auth log stats: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 @app.get("/health")
 @app.get("/health")
 async def health_check():
@@ -1287,6 +1576,18 @@ async def proxy_couchdb(
             log_msg += f" | Unverified payload: sub={unverified.get('sub', 'N/A')}, exp={unverified.get('exp', 'N/A')}, iat={unverified.get('iat', 'N/A')}"
 
         logger.warning(log_msg)
+        
+        # Log failed token validation
+        if auth_log_service:
+            import asyncio
+            asyncio.create_task(auth_log_service.log_token_validation(
+                success=False,
+                ip=request.client.host if request.client else None,
+                issuer=unverified.get('iss') if unverified else None,
+                error_reason=error_reason,
+                endpoint=f"{request.method} /{path}"
+            ))
+        
         raise HTTPException(status_code=401, detail=f"Invalid or expired token ({error_reason})")
 
     client_id = payload.get("sub")
@@ -1362,6 +1663,20 @@ async def proxy_couchdb(
 
     # Determine application type for conditional tenant enforcement (moved up for logging)
     is_roady_app = is_roady_application(path, payload)
+    
+    # Log successful authentication event
+    if auth_log_service:
+        import asyncio
+        asyncio.create_task(auth_log_service.log_auth_event(
+            action="auth_request",
+            status="success",
+            user_id=client_id,
+            tenant_id=tenant_id,
+            endpoint=f"{request.method} /{path}",
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            issuer=payload.get("iss")
+        ))
 
     # SECURITY: Never log full JWT payload (CWE-532)
     # Instead log only safe, non-sensitive attributes
