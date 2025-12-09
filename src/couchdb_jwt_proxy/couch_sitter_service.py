@@ -1164,7 +1164,26 @@ class CouchSitterService:
             logger.info(f"Created owner mapping: {mapping_id}")
 
             # Update user's tenantIds list (multi-tenant schema)
-            user_doc = await self.find_user_by_sub_hash(self._hash_sub(user_id.replace("user_", "")))
+            # Try to find user by direct lookup first (for users with user_id format),
+            # then by hashed lookup (for newer users with hashed format)
+            user_doc = None
+            
+            # First try direct lookup using the user_id
+            try:
+                response = await self._make_request("GET", user_id)
+                user_doc = response.json()
+                logger.debug(f"Found user by direct lookup: {user_id}")
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code != 404:
+                    raise
+                
+                # If not found, try hashed lookup
+                # Extract the actual sub from user_id (format: "user_<sub>")
+                sub_from_user_id = user_id.replace("user_", "") if user_id.startswith("user_") else user_id
+                user_doc = await self.find_user_by_sub_hash(self._hash_sub(sub_from_user_id))
+                if user_doc:
+                    logger.debug(f"Found user by hash lookup for sub: {sub_from_user_id}")
+            
             if user_doc:
                 tenant_ids = user_doc.get("tenantIds", [])
                 if tenant_id not in tenant_ids:
