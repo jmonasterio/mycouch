@@ -71,6 +71,8 @@ class ClerkService:
         """
         Get the Clerk client for a specific issuer.
         
+        Loads client from cache if available, otherwise tries to load from APPLICATIONS if configured.
+        
         Args:
             issuer: Clerk Issuer URL (optional, defaults to self.default_issuer)
             
@@ -84,7 +86,30 @@ class ClerkService:
         # Normalize issuer (remove trailing slash)
         target_issuer = target_issuer.rstrip('/')
         
-        return self.clients.get(target_issuer)
+        # Check cache first
+        if target_issuer in self.clients:
+            return self.clients[target_issuer]
+        
+        # Try to load from APPLICATIONS if available (live loading)
+        try:
+            from .main import APPLICATIONS
+            if target_issuer in APPLICATIONS:
+                app_config = APPLICATIONS[target_issuer]
+                if isinstance(app_config, dict):
+                    secret_key = app_config.get("clerkSecretKey")
+                    if secret_key:
+                        self.register_app(target_issuer, secret_key)
+                        logger.info(f"Loaded and registered Clerk client from APPLICATIONS: {target_issuer}")
+                        return self.clients.get(target_issuer)
+                    else:
+                        logger.warning(f"No clerkSecretKey in APPLICATIONS for {target_issuer}")
+        except ImportError:
+            # main module not available, skip APPLICATIONS lookup
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to load Clerk client from APPLICATIONS for {target_issuer}: {e}")
+        
+        return None
 
     async def verify_session_token(self, token: str, issuer: str = None) -> Optional[Dict[str, Any]]:
         """

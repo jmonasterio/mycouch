@@ -1,0 +1,656 @@
+"""
+API Routes for Tenant and Invitation Management
+
+Provides endpoints for creating/managing workspaces and invitations.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from typing import Optional, Dict, Any, List
+import logging
+
+from .auth_middleware import get_current_user
+
+logger = logging.getLogger(__name__)
+
+
+def create_tenant_router(couch_sitter_service, invite_service):
+    """
+    Create FastAPI router for tenant and invitation endpoints.
+
+    Args:
+        couch_sitter_service: CouchSitterService instance
+        invite_service: InviteService instance
+
+    Returns:
+        APIRouter with all tenant/invitation endpoints
+    """
+    router = APIRouter(prefix="/api", tags=["tenants"])
+
+    # ============ TENANT MANAGEMENT ============
+
+    @router.post("/tenants")
+    async def create_tenant(
+        request_data: Dict[str, Any] = Body(...),
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        Create a new workspace tenant.
+
+        Request:
+            - name: Workspace name
+
+        Returns:
+            Created tenant document
+        """
+        try:
+            name = request_data.get("name")
+            if not name:
+                raise HTTPException(status_code=400, detail="Tenant name is required")
+
+            user_id = current_user.get("user_id")
+            app_id = current_user.get("application_id", "roady")
+
+            tenant = await couch_sitter_service.create_workspace_tenant(
+                user_id=user_id,
+                name=name,
+                application_id=app_id
+            )
+
+            return {
+                "tenantId": tenant.get("_id"),
+                "_id": tenant.get("_id"),
+                "type": tenant.get("type"),
+                "name": tenant.get("name"),
+                "applicationId": tenant.get("applicationId"),
+                "userId": tenant.get("userId"),
+                "userIds": tenant.get("userIds"),
+                "createdAt": tenant.get("createdAt"),
+                "metadata": tenant.get("metadata")
+            }
+
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Error creating tenant: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create tenant")
+
+    @router.get("/my-tenants")
+    async def list_user_tenants(
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        List all tenants the user has access to.
+
+        Returns:
+            List of tenants with user's role for each
+        """
+        try:
+            user_id = current_user.get("user_id")
+            tenant_id = current_user.get("tenant_id")
+            sub = current_user.get("sub")
+
+            # Get all tenants for user
+            tenants_list, personal_tenant_id = await couch_sitter_service.get_user_tenants(sub)
+
+            return {
+                "tenants": tenants_list,
+                "activeTenantId": tenant_id or personal_tenant_id
+            }
+
+        except Exception as e:
+            logger.error(f"Error listing tenants: {e}")
+            raise HTTPException(status_code=500, detail="Failed to list tenants")
+
+    @router.get("/tenants/{tenant_id}")
+    async def get_tenant(
+        tenant_id: str,
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        Get full tenant details including members and roles.
+
+        Returns:
+            Tenant document with members list
+        """
+        try:
+            user_id = current_user.get("user_id")
+
+            # Check access
+            tenant = await couch_sitter_service.get_tenant(tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=404, detail="Tenant not found")
+
+            user_ids = tenant.get("userIds", [])
+            if user_id not in user_ids:
+                raise HTTPException(status_code=403, detail="You do not have access to this tenant")
+
+            # Get members with roles
+            members = []
+            for uid in user_ids:
+                mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, uid)
+                if mapping:
+                    role = mapping.get("role", "member")
+                    joined_at = mapping.get("joinedAt")
+                else:
+                    role = "owner" if uid == tenant.get("userId") else "member"
+                    joined_at = tenant.get("createdAt")
+
+                members.append({
+                    "userId": uid,
+                    "role": role,
+                    "joinedAt": joined_at
+                })
+
+            return {
+                "_id": tenant.get("_id"),
+                "type": tenant.get("type"),
+                "name": tenant.get("name"),
+                "userId": tenant.get("userId"),
+                "userIds": tenant.get("userIds"),
+                "members": members,
+                "createdAt": tenant.get("createdAt")
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting tenant: {e}")
+            raise HTTPException(status_code=500, detail="Failed to get tenant")
+
+    @router.put("/tenants/{tenant_id}")
+    async def update_tenant(
+        tenant_id: str,
+        request_data: Dict[str, Any],
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        Update tenant (owner only).
+
+        Request:
+            - name: New tenant name
+
+        Returns:
+            Updated tenant
+        """
+        try:
+            user_id = current_user.get("user_id")
+
+            # Get tenant and check ownership
+            tenant = await couch_sitter_service.get_tenant(tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=404, detail="Tenant not found")
+
+            if tenant.get("userId") != user_id:
+                raise HTTPException(status_code=403, detail="Only owner can update tenant")
+
+            # Update name
+            if "name" in request_data:
+                tenant["name"] = request_data["name"]
+
+            from datetime import datetime, timezone
+            tenant["updatedAt"] = datetime.now(timezone.utc).isoformat()
+
+            response = await couch_sitter_service._make_request("PUT", tenant_id, json=tenant)
+            updated = response.json()
+
+            return {
+                "_id": tenant.get("_id"),
+                "name": tenant.get("name"),
+                "updatedAt": tenant.get("updatedAt")
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating tenant: {e}")
+            raise HTTPException(status_code=500, detail="Failed to update tenant")
+
+    @router.delete("/tenants/{tenant_id}")
+    async def delete_tenant(
+        tenant_id: str,
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        Delete a tenant (owner only, cannot delete personal).
+
+        Returns:
+            204 No Content
+        """
+        try:
+            user_id = current_user.get("user_id")
+
+            # Get tenant
+            tenant = await couch_sitter_service.get_tenant(tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=404, detail="Tenant not found")
+
+            # Check if personal
+            if tenant.get("metadata", {}).get("autoCreated"):
+                raise HTTPException(status_code=400, detail="Cannot delete personal tenant")
+
+            # Check ownership
+            if tenant.get("userId") != user_id:
+                raise HTTPException(status_code=403, detail="Only owner can delete tenant")
+
+            # Soft delete
+            from datetime import datetime, timezone
+            tenant["deletedAt"] = datetime.now(timezone.utc).isoformat()
+            await couch_sitter_service._make_request("PUT", tenant_id, json=tenant)
+
+            return {"status": "deleted"}
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error deleting tenant: {e}")
+            raise HTTPException(status_code=500, detail="Failed to delete tenant")
+
+    # ============ INVITATION MANAGEMENT ============
+
+    @router.post("/tenants/{tenant_id}/invitations")
+    async def create_invitation(
+        tenant_id: str,
+        request_data: Dict[str, Any],
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        Create an invitation for a workspace tenant (owner/admin only).
+
+        Request:
+            - email: Email to invite
+            - role: Role to assign (member, admin)
+
+        Returns:
+            Invitation with token and invite link
+        """
+        try:
+            user_id = current_user.get("user_id")
+            email = request_data.get("email")
+            role = request_data.get("role", "member")
+
+            if not email:
+                raise HTTPException(status_code=400, detail="Email is required")
+
+            if role not in ["member", "admin"]:
+                raise HTTPException(status_code=400, detail="Invalid role")
+
+            # Check tenant access and role
+            tenant = await couch_sitter_service.get_tenant(tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=404, detail="Tenant not found")
+
+            # Cannot invite to personal tenants
+            if tenant.get("metadata", {}).get("autoCreated"):
+                raise HTTPException(status_code=400, detail="Cannot invite users to personal tenant")
+
+            # Check if owner or admin
+            mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, user_id)
+            user_role = mapping.get("role") if mapping else None
+
+            if user_role not in ["owner", "admin"]:
+                raise HTTPException(status_code=403, detail="Only owner/admin can create invitations")
+
+            # Create invitation
+            invitation = await invite_service.create_invitation(
+                tenant_id=tenant_id,
+                tenant_name=tenant.get("name"),
+                email=email,
+                role=role,
+                created_by=user_id
+            )
+
+            return {
+                "_id": invitation.get("_id"),
+                "tenantId": invitation.get("tenantId"),
+                "tenantName": invitation.get("tenantName"),
+                "email": invitation.get("email"),
+                "role": invitation.get("role"),
+                "status": invitation.get("status"),
+                "token": invitation.get("token"),
+                "inviteLink": f"https://app.example.com/join?invite={invitation.get('token')}",
+                "expiresAt": invitation.get("expiresAt"),
+                "createdAt": invitation.get("createdAt")
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error creating invitation: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create invitation")
+
+    @router.get("/tenants/{tenant_id}/invitations")
+    async def list_invitations(
+        tenant_id: str,
+        status: Optional[str] = Query(None),
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        List invitations for a tenant (owner/admin only).
+
+        Query:
+            - status: Filter by pending/accepted/revoked
+
+        Returns:
+            List of invitations
+        """
+        try:
+            user_id = current_user.get("user_id")
+
+            # Check access
+            tenant = await couch_sitter_service.get_tenant(tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=404, detail="Tenant not found")
+
+            mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, user_id)
+            user_role = mapping.get("role") if mapping else None
+
+            if user_role not in ["owner", "admin"]:
+                raise HTTPException(status_code=403, detail="Only owner/admin can list invitations")
+
+            # Get invitations
+            invitations = await invite_service.get_invitations_for_tenant(tenant_id, status)
+
+            return [
+                {
+                    "_id": inv.get("_id"),
+                    "email": inv.get("email"),
+                    "role": inv.get("role"),
+                    "status": inv.get("status"),
+                    "createdAt": inv.get("createdAt"),
+                    "expiresAt": inv.get("expiresAt")
+                }
+                for inv in invitations
+            ]
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error listing invitations: {e}")
+            raise HTTPException(status_code=500, detail="Failed to list invitations")
+
+    @router.get("/invitations/preview")
+    async def preview_invitation(token: str = Query(...)):
+        """
+        Preview an invitation (no auth required).
+
+        Query:
+            - token: Invitation token
+
+        Returns:
+            Invitation preview
+        """
+        try:
+            invitation = await invite_service.validate_token(token)
+            if not invitation:
+                raise HTTPException(status_code=400, detail="Invalid or expired invitation")
+
+            return {
+                "tenantName": invitation.get("tenantName"),
+                "role": invitation.get("role"),
+                "isValid": True,
+                "expiresAt": invitation.get("expiresAt")
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error previewing invitation: {e}")
+            raise HTTPException(status_code=500, detail="Failed to preview invitation")
+
+    @router.post("/invitations/accept")
+    async def accept_invitation(request_data: Dict[str, Any]):
+        """
+        Accept an invitation (no auth required, uses token + Clerk ID).
+
+        Request:
+            - token: Invitation token
+            - clerkUserId: User's Clerk ID
+
+        Returns:
+            Success with tenant info
+        """
+        try:
+            token = request_data.get("token")
+            clerk_user_id = request_data.get("clerkUserId")
+
+            if not token or not clerk_user_id:
+                raise HTTPException(status_code=400, detail="Token and clerkUserId required")
+
+            # Validate token
+            invitation = await invite_service.validate_token(token)
+            if not invitation:
+                raise HTTPException(status_code=400, detail="Invalid or expired invitation")
+
+            # Check if already accepted
+            if invitation.get("status") == "accepted":
+                raise HTTPException(status_code=400, detail="Invitation has already been accepted")
+
+            user_id = f"user_{clerk_user_id}"
+            tenant_id = invitation.get("tenantId")
+            role = invitation.get("role", "member")
+
+            # Add user to tenant
+            await couch_sitter_service.add_user_to_tenant(tenant_id, user_id, role)
+
+            # Mark invitation as accepted
+            await invite_service.accept_invitation(invitation, user_id)
+
+            # Get tenant for response
+            tenant = await couch_sitter_service.get_tenant(tenant_id)
+
+            return {
+                "success": True,
+                "tenantId": tenant_id,
+                "tenantName": tenant.get("name"),
+                "role": role
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error accepting invitation: {e}")
+            raise HTTPException(status_code=500, detail="Failed to accept invitation")
+
+    @router.delete("/tenants/{tenant_id}/invitations/{invite_id}")
+    async def revoke_invitation(
+        tenant_id: str,
+        invite_id: str,
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        Revoke a pending invitation (owner/admin only).
+
+        Returns:
+            204 No Content
+        """
+        try:
+            user_id = current_user.get("user_id")
+
+            # Check access
+            mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, user_id)
+            user_role = mapping.get("role") if mapping else None
+
+            if user_role not in ["owner", "admin"]:
+                raise HTTPException(status_code=403, detail="Only owner/admin can revoke invitations")
+
+            # Revoke invitation
+            await invite_service.revoke_invitation(invite_id)
+
+            return {"status": "revoked"}
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error revoking invitation: {e}")
+            raise HTTPException(status_code=500, detail="Failed to revoke invitation")
+
+    @router.post("/tenants/{tenant_id}/invitations/{invite_id}/resend")
+    async def resend_invitation(
+        tenant_id: str,
+        invite_id: str,
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        Resend an invitation (owner/admin only).
+
+        Returns:
+            Updated invitation with new token
+        """
+        try:
+            user_id = current_user.get("user_id")
+
+            # Check access
+            mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, user_id)
+            user_role = mapping.get("role") if mapping else None
+
+            if user_role not in ["owner", "admin"]:
+                raise HTTPException(status_code=403, detail="Only owner/admin can resend invitations")
+
+            # Get invitation
+            invitation = await invite_service.get_invitation_by_id(invite_id)
+            if not invitation:
+                raise HTTPException(status_code=404, detail="Invitation not found")
+
+            # Generate new token
+            new_token = invite_service.generate_token()
+            new_hash = invite_service.hash_token(new_token)
+
+            from datetime import datetime, timezone, timedelta
+            expiration_days = 7
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=expiration_days)).isoformat()
+
+            invitation["token"] = new_token
+            invitation["tokenHash"] = new_hash
+            invitation["expiresAt"] = expires_at
+
+            await couch_sitter_service._make_request("PUT", invite_id, json=invitation)
+
+            return {
+                "_id": invitation.get("_id"),
+                "email": invitation.get("email"),
+                "status": invitation.get("status"),
+                "token": new_token,
+                "inviteLink": f"https://app.example.com/join?invite={new_token}",
+                "expiresAt": expires_at
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error resending invitation: {e}")
+            raise HTTPException(status_code=500, detail="Failed to resend invitation")
+
+    # ============ MEMBER MANAGEMENT ============
+
+    @router.put("/tenants/{tenant_id}/members/{member_user_id}/role")
+    async def change_member_role(
+        tenant_id: str,
+        member_user_id: str,
+        request_data: Dict[str, Any],
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        Change a member's role (owner only).
+
+        Request:
+            - role: New role (admin, member)
+
+        Returns:
+            Updated mapping
+        """
+        try:
+            user_id = current_user.get("user_id")
+            new_role = request_data.get("role")
+
+            if new_role not in ["admin", "member"]:
+                raise HTTPException(status_code=400, detail="Invalid role")
+
+            # Check ownership
+            tenant = await couch_sitter_service.get_tenant(tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=404, detail="Tenant not found")
+
+            if tenant.get("userId") != user_id:
+                raise HTTPException(status_code=403, detail="Only owner can change member roles")
+
+            # Cannot change owner role
+            if member_user_id == tenant.get("userId"):
+                raise HTTPException(status_code=400, detail="Cannot change owner role")
+
+            # Update mapping
+            mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, member_user_id)
+            if not mapping:
+                raise HTTPException(status_code=404, detail="Member not found")
+
+            mapping["role"] = new_role
+            from datetime import datetime, timezone
+            mapping["updatedAt"] = datetime.now(timezone.utc).isoformat()
+
+            mapping_id = f"tenant_user_mapping:{tenant_id}:{member_user_id}"
+            await couch_sitter_service._make_request("PUT", mapping_id, json=mapping)
+
+            return {
+                "userId": member_user_id,
+                "role": new_role,
+                "updatedAt": mapping.get("updatedAt")
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error changing member role: {e}")
+            raise HTTPException(status_code=500, detail="Failed to change member role")
+
+    @router.delete("/tenants/{tenant_id}/members/{member_user_id}")
+    async def remove_member(
+        tenant_id: str,
+        member_user_id: str,
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
+        """
+        Remove a member from tenant (owner/admin only).
+
+        Returns:
+            204 No Content
+        """
+        try:
+            user_id = current_user.get("user_id")
+
+            # Check access
+            tenant = await couch_sitter_service.get_tenant(tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=404, detail="Tenant not found")
+
+            mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, user_id)
+            user_role = mapping.get("role") if mapping else None
+
+            if user_role not in ["owner", "admin"]:
+                raise HTTPException(status_code=403, detail="Only owner/admin can remove members")
+
+            # Cannot remove owner
+            if member_user_id == tenant.get("userId"):
+                raise HTTPException(status_code=400, detail="Cannot remove owner from tenant")
+
+            # Remove from userIds
+            tenant["userIds"] = [uid for uid in tenant.get("userIds", []) if uid != member_user_id]
+            from datetime import datetime, timezone
+            tenant["updatedAt"] = datetime.now(timezone.utc).isoformat()
+
+            await couch_sitter_service._make_request("PUT", tenant_id, json=tenant)
+
+            # Remove mapping (soft delete)
+            mapping_id = f"tenant_user_mapping:{tenant_id}:{member_user_id}"
+            member_mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, member_user_id)
+            if member_mapping:
+                member_mapping["removedAt"] = datetime.now(timezone.utc).isoformat()
+                await couch_sitter_service._make_request("PUT", mapping_id, json=member_mapping)
+
+            return {"status": "removed"}
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error removing member: {e}")
+            raise HTTPException(status_code=500, detail="Failed to remove member")
+
+    return router

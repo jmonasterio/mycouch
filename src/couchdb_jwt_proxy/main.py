@@ -10,7 +10,7 @@ from functools import lru_cache
 from jwt import PyJWKClient
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header, Request, Body
 from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
@@ -26,6 +26,9 @@ from .couch_sitter_service import CouchSitterService, ADMIN_TENANT_ID
 from .clerk_service import ClerkService
 from .dal import create_dal
 from .auth_log_service import AuthLogService
+from .invite_service import InviteService
+from .tenant_routes import create_tenant_router
+from . import auth_middleware
 
 # Load environment variables
 load_dotenv()
@@ -167,11 +170,22 @@ couch_sitter_service = CouchSitterService(
     dal=dal
 )
 
+# Initialize Invitation Service
+invite_service = InviteService(
+    couch_sitter_db_url=COUCH_SITTER_DB_URL,
+    couchdb_user=COUCHDB_USER,
+    couchdb_password=COUCHDB_PASSWORD,
+    dal=dal
+)
+
 # Initialize Clerk Backend API service
 clerk_service = ClerkService(
     secret_key=CLERK_SECRET_KEY,
     issuer_url=CLERK_ISSUER_URL
 )
+
+# Set clerk_service for auth_middleware
+auth_middleware.set_clerk_service(clerk_service)
 
 # Initialize Auth Log Service (optional - only if log database URL is configured)
 auth_log_service = None
@@ -839,7 +853,7 @@ async def startup_event():
     else:
         logger.info("[Startup] Auth log service not configured")
 
-# Add CORS middleware
+# Add CORS middleware (before tenant router registration to ensure proper middleware ordering)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins - restrict in production if needed
@@ -1093,7 +1107,7 @@ Clerk Dashboard → Sessions → Customize session token
 @limiter.limit("10/minute")
 async def choose_tenant(
     request: Request,
-    tenant_request: Dict[str, str],
+    tenant_request: Dict[str, str] = Body(...),
     authorization: Optional[str] = Header(None)
 ):
     """
@@ -1137,34 +1151,20 @@ async def choose_tenant(
             logger.warning(f"Accessible tenants: {accessible_tenant_ids}")
             raise HTTPException(status_code=403, detail="Access denied: tenant not found")
 
-        # Update active tenant in Clerk metadata (if Clerk Backend API is configured)
-        if clerk_service.is_configured() and user_info.get("session_id"):
-            success = await clerk_service.update_active_tenant_in_session(
-                user_id=user_info["user_id"],
-                session_id=user_info["session_id"],
+        # Update active tenant in user metadata (appears in JWT via {{user.public_metadata.active_tenant_id}})
+        if clerk_service.is_configured():
+            success = await clerk_service.update_user_active_tenant(
+                user_id=user_info.get("sub"),
                 tenant_id=tenant_id,
                 issuer=user_info.get("iss")
             )
             if success:
-                logger.info(f"Updated active tenant in Clerk metadata for user {user_info['user_id']}: {tenant_id}")
-                
-                # SECURITY FIX #2: Validate JWT template configuration
-                # The client should get a new JWT which will contain the active_tenant_id claim
-                # if Clerk JWT Template is properly configured
-                logger.info(f"ℹ️ JWT template verification: Client should refresh token to get active_tenant_id claim")
-                logger.info(f"   If claim is missing after refresh, Clerk JWT Template may not be configured correctly")
-            else:
-                logger.warning(f"Failed to update active tenant in Clerk metadata for user {user_info['user_id']}")
-        else:
-            # Fallback: Update user metadata instead of session metadata
-            success = await clerk_service.update_user_active_tenant(
-                user_id=user_info["user_id"],
-                tenant_id=tenant_id
-            )
-            if success:
                 logger.info(f"Updated active tenant in user metadata for user {user_info['user_id']}: {tenant_id}")
+                logger.info(f"ℹ️ Client should refresh token to get updated active_tenant_id claim in JWT")
             else:
                 logger.warning(f"Failed to update active tenant in user metadata for user {user_info['user_id']}")
+        else:
+            logger.warning("Clerk Backend API not configured - cannot update active tenant")
 
         return {
             "success": True,
@@ -1528,6 +1528,11 @@ async def proxy_couchdb_streaming(
         stream_from_couchdb(),
         media_type="application/json"
     )
+
+# Add Tenant Management Routes (BEFORE catch-all to ensure /api/* routes match first)
+tenant_router = create_tenant_router(couch_sitter_service, invite_service)
+app.include_router(tenant_router)
+logger.info("✓ Registered tenant and invitation management routes")
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "COPY", "PATCH", "OPTIONS"])
 async def proxy_couchdb(

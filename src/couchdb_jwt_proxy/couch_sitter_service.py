@@ -866,7 +866,7 @@ class CouchSitterService:
                         {"type": "app"}
                     ]
                 },
-                "fields": ["issuer", "databaseNames", "name", "clerkSecretKey"]
+                "fields": ["issuer", "clerkIssuerId", "databaseNames", "databaseName", "name", "clerkSecretKey", "deletedAt"]
             }
 
             response = await self._make_request("POST", "_find", json=query)
@@ -874,8 +874,12 @@ class CouchSitterService:
 
             apps = {}
             for doc in result.get("docs", []):
-                issuer = doc.get("issuer")
-                database_names = doc.get("databaseNames", [])
+                # Skip deleted documents
+                if doc.get("deletedAt"):
+                    continue
+                    
+                issuer = doc.get("issuer") or doc.get("clerkIssuerId")
+                database_names = doc.get("databaseNames") or ([doc.get("databaseName")] if doc.get("databaseName") else [])
                 if issuer and database_names:
                     apps[issuer] = {
                         "databaseNames": database_names,
@@ -944,6 +948,10 @@ class CouchSitterService:
             try:
                 response = await self._make_request("GET", tenant_id)
                 tenant_doc = response.json()
+                
+                # Skip deleted tenants
+                if tenant_doc.get("deletedAt"):
+                    continue
                 
                 tenants.append({
                     "tenantId": tenant_id,
@@ -1102,4 +1110,186 @@ class CouchSitterService:
 
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to migrate user to multi-tenant schema: {e}")
+            raise
+
+    async def create_workspace_tenant(self, user_id: str, name: str, application_id: str) -> Dict[str, Any]:
+        """
+        Create a new workspace tenant (not personal).
+
+        Args:
+            user_id: ID of the owner (creator)
+            name: Tenant name
+            application_id: Application ID (e.g., 'roady')
+
+        Returns:
+            Created tenant document
+
+        Raises:
+            httpx.HTTPError: If database operation fails
+        """
+        tenant_id = f"tenant_{uuid.uuid4()}"
+        current_time = datetime.now(timezone.utc).isoformat()
+
+        tenant_doc = {
+            "_id": tenant_id,
+            "type": "tenant",
+            "name": name,
+            "applicationId": application_id,
+            "userId": user_id,
+            "userIds": [user_id],
+            "createdAt": current_time,
+            "metadata": {
+                "createdBy": user_id,
+                "autoCreated": False
+            }
+        }
+
+        try:
+            response = await self._make_request("PUT", tenant_id, json=tenant_doc)
+            created = response.json()
+            logger.info(f"Created workspace tenant: {tenant_id} owned by {user_id}")
+
+            # Create tenant_user_mapping for owner
+            mapping_id = f"tenant_user_mapping:{tenant_id}:{user_id}"
+            mapping_doc = {
+                "_id": mapping_id,
+                "type": "tenant_user_mapping",
+                "tenantId": tenant_id,
+                "userId": user_id,
+                "role": "owner",
+                "joinedAt": current_time
+            }
+            
+            await self._make_request("PUT", mapping_id, json=mapping_doc)
+            logger.info(f"Created owner mapping: {mapping_id}")
+
+            # Update user's tenantIds list (multi-tenant schema)
+            user_doc = await self.find_user_by_sub_hash(self._hash_sub(user_id.replace("user_", "")))
+            if user_doc:
+                tenant_ids = user_doc.get("tenantIds", [])
+                if tenant_id not in tenant_ids:
+                    tenant_ids.append(tenant_id)
+                    user_doc["tenantIds"] = tenant_ids
+                    user_doc["updatedAt"] = current_time
+                    await self._make_request("PUT", user_doc["_id"], json=user_doc)
+                    logger.info(f"Added tenant {tenant_id} to user {user_id}'s tenantIds")
+
+            return tenant_doc
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to create workspace tenant: {e}")
+            raise
+
+    async def get_tenant(self, tenant_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a tenant document by ID.
+        
+        Deleted tenants (with deletedAt field) are treated as not found.
+
+        Args:
+            tenant_id: Tenant ID
+
+        Returns:
+            Tenant document if found and not deleted, None otherwise
+        """
+        try:
+            response = await self._make_request("GET", tenant_id)
+            response.raise_for_status()
+            doc = response.json()
+            
+            # Treat deleted tenants as not found
+            if doc.get("deletedAt"):
+                logger.debug(f"Tenant is deleted: {tenant_id}")
+                return None
+            
+            logger.debug(f"Found tenant: {tenant_id}")
+            return doc
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.debug(f"Tenant not found: {tenant_id}")
+                return None
+            logger.error(f"Error fetching tenant {tenant_id}: {e}")
+            raise
+
+    async def add_user_to_tenant(
+        self,
+        tenant_id: str,
+        user_id: str,
+        role: str = "member"
+    ) -> Dict[str, Any]:
+        """
+        Add a user to a tenant.
+
+        Args:
+            tenant_id: Tenant ID
+            user_id: User ID to add
+            role: Role to assign (member, admin, owner)
+
+        Returns:
+            Updated tenant document
+
+        Raises:
+            httpx.HTTPError: If database operation fails
+        """
+        try:
+            tenant = await self.get_tenant(tenant_id)
+            if not tenant:
+                raise ValueError(f"Tenant not found: {tenant_id}")
+
+            # Add user to userIds if not already present
+            user_ids = tenant.get("userIds", [])
+            if user_id not in user_ids:
+                user_ids.append(user_id)
+                tenant["userIds"] = user_ids
+                tenant["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                
+                response = await self._make_request("PUT", tenant_id, json=tenant)
+                updated = response.json()
+                logger.info(f"Added user {user_id} to tenant {tenant_id}")
+
+            # Create tenant_user_mapping
+            mapping_id = f"tenant_user_mapping:{tenant_id}:{user_id}"
+            current_time = datetime.now(timezone.utc).isoformat()
+            
+            mapping_doc = {
+                "_id": mapping_id,
+                "type": "tenant_user_mapping",
+                "tenantId": tenant_id,
+                "userId": user_id,
+                "role": role,
+                "joinedAt": current_time,
+                "acceptedAt": current_time
+            }
+
+            await self._make_request("PUT", mapping_id, json=mapping_doc)
+            logger.info(f"Created mapping: {mapping_id} with role {role}")
+
+            return tenant
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to add user to tenant: {e}")
+            raise
+
+    async def get_tenant_user_mapping(self, tenant_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a tenant_user_mapping document.
+
+        Args:
+            tenant_id: Tenant ID
+            user_id: User ID
+
+        Returns:
+            Mapping document if found, None otherwise
+        """
+        mapping_id = f"tenant_user_mapping:{tenant_id}:{user_id}"
+        try:
+            response = await self._make_request("GET", mapping_id)
+            doc = response.json()
+            logger.debug(f"Found mapping: {mapping_id}")
+            return doc
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.debug(f"Mapping not found: {mapping_id}")
+                return None
+            logger.error(f"Error fetching mapping {mapping_id}: {e}")
             raise

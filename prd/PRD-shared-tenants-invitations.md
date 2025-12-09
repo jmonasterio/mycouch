@@ -2,14 +2,17 @@
 
 ## Overview
 
-Users create and manage **tenants** (workspaces). All tenants have the same structure and access control model.
+Users create and manage **tenants** (workspaces). All tenants use identical structure and access control:
 
-- **Personal Tenant** (auto-created on first login) - Marked with `isPersonal: true`, owned by user, not yet shared via invitations
-- **Workspace Tenants** (created by user) - Marked with `isPersonal: false`, can be shared with multiple users via invitations
+- **Auto-created Tenant** (first login) - Created automatically for each user, initially has only owner in `userIds`
+- **User-created Tenants** - Created by user via API, can be shared by inviting others
 
-Both types use identical schemas and authorization rules. The difference is invitations — personal tenants cannot be shared yet, but could be in the future.
+Access control is tracked purely via:
+- `userId` field (who owns/created it)
+- `userIds` array (all users with access)
+- `tenant_user_mapping` documents (per-user roles)
 
-Apps (like Roady) interpret workspaces as "bands" or "projects" — backend just calls them tenants.
+No special flags needed. Apps (like Roady) interpret tenants as "bands" or "projects" — backend just calls them tenants.
 
 ---
 
@@ -19,25 +22,25 @@ Apps (like Roady) interpret workspaces as "bands" or "projects" — backend just
 - User who creates a tenant is the **owner** (stored in `userId` field)
 - Owner cannot be removed or downgraded to admin/member
 - Only owner can delete the tenant
-- Personal tenants are auto-created, user is owner
+- All tenants have single owner (the creator)
 
 ### 2. Tenant Membership & Roles
 - All tenants use identical structure: `userId` (owner), `userIds` array, `tenant_user_mapping` docs
-- Users access tenants via **tenant_user_mapping** documents
-- Roles: `owner`, `admin`, `member`
+- Access tracked via `userIds` array (list of all user IDs with access)
+- Roles stored in `tenant_user_mapping` documents: `owner`, `admin`, `member`
 - Role enforcement is per-tenant
 - Owner/admin can manage other members
 
 ### 3. Invitations
-- Owner/admin creates invite tied to specific **non-personal** tenant
+- Owner/admin creates invite tied to specific tenant
 - Invitations are single-use, token-based
-- On acceptance, invited user becomes member of workspace
-- Personal tenants cannot be shared (future enhancement)
+- On acceptance, invited user added to `userIds` and gets `tenant_user_mapping` document with role
+- Backend enforces: only owner can change roles, owner cannot be removed
 
 ### 4. App-Agnostic Design
 - Backend doesn't know what tenant represents (band, project, team, etc.)
-- `isPersonal` flag is the only semantic difference
-- Invitations work for any workspace tenant, any app
+- Access is tracked purely by `userIds` and `tenant_user_mapping`
+- Invitations work for any tenant, any app
 
 ---
 
@@ -86,9 +89,8 @@ Apps (like Roady) interpret workspaces as "bands" or "projects" — backend just
   "type": "tenant",
   "name": "Workspace Name",
   "applicationId": "roady",
-  "isPersonal": false,
-  "userId": "user_abc123",       // owner (for personal tenants)
-  "userIds": ["user_abc123", "user_def456"],
+  "userId": "user_abc123",       // owner (creator)
+  "userIds": ["user_abc123", "user_def456"],  // all users with access
   "createdAt": "2025-01-08T12:00:00Z",
   "updatedAt": "2025-01-08T12:00:00Z",
   "metadata": {
@@ -98,7 +100,7 @@ Apps (like Roady) interpret workspaces as "bands" or "projects" — backend just
 }
 ```
 
-Note: `isPersonal: true` = personal tenant (auto-created, cannot invite yet), `isPersonal: false` = workspace (can invite users)
+Note: Access is tracked via `userIds` array. Single owner (`userId`). No special flags needed.
 
 ### Tenant-User Mapping Document
 
@@ -144,7 +146,7 @@ Stores user roles in workspaces (not needed for personal tenants):
 
 ### Tenant Management
 
-**Create Workspace Tenant**
+**Create New Tenant**
 ```
 POST /api/tenants
 Authorization: Bearer <jwt>
@@ -159,38 +161,42 @@ Response:
   "_id": "tenant_1",
   "name": "Workspace Name",
   "applicationId": "roady",
-  "isPersonal": false,
-  "userId": "user_abc123",
-  "userIds": ["user_abc123"],
+  "userId": "user_abc123",         // requesting user is owner
+  "userIds": ["user_abc123"],      // initially just the owner
   "createdAt": "2025-01-08T12:00:00Z"
 }
 ```
 
+The requesting user (from JWT) automatically becomes the owner and is added to `userIds`. A `tenant_user_mapping` document is created with role `owner`.
+
 **List User's Tenants**
 ```
-GET /api/tenants
+GET /my-tenants
 Authorization: Bearer <jwt>
 
 Response:
-[
-  {
-    "_id": "tenant_xyz",
-    "name": "Alice's Workspace",
-    "isPersonal": true,
-    "role": "owner",
-    "userIds": ["user_abc123"]
-  },
-  {
-    "_id": "tenant_1",
-    "name": "Workspace Name",
-    "isPersonal": false,
-    "role": "owner",
-    "userIds": ["user_abc123", "user_def456"]
-  }
-]
+{
+  "tenants": [
+    {
+      "tenantId": "tenant_xyz",
+      "name": "Alice's Workspace",
+      "role": "owner",
+      "userIds": ["user_abc123"]
+    },
+    {
+      "tenantId": "tenant_1",
+      "name": "Workspace Name",
+      "role": "member",
+      "userIds": ["user_abc123", "user_def456"]
+    }
+  ],
+  "activeTenantId": "tenant_xyz"
+}
 ```
 
-**Get Workspace Details**
+Role is determined from the requesting user's `tenant_user_mapping` for each tenant. Active tenant is tracked in Clerk metadata and returned for UI context.
+
+**Get Tenant Details**
 ```
 GET /api/tenants/{tenantId}
 Authorization: Bearer <jwt>
@@ -199,8 +205,8 @@ Response:
 {
   "_id": "tenant_1",
   "name": "Workspace Name",
-  "isPersonal": false,
   "userId": "user_abc123",     // owner
+  "userIds": ["user_abc123", "user_def456"],
   "members": [
     {
       "userId": "user_abc123",
@@ -219,7 +225,9 @@ Response:
 }
 ```
 
-**Update Workspace** (owner only, personal tenant cannot be updated)
+Member roles come from `tenant_user_mapping` documents.
+
+**Update Tenant** (owner only)
 ```
 PUT /api/tenants/{tenantId}
 Authorization: Bearer <jwt>
@@ -229,7 +237,7 @@ Authorization: Bearer <jwt>
 }
 ```
 
-**Delete Workspace** (owner only, soft delete via metadata)
+**Delete Tenant** (owner only, soft delete)
 ```
 DELETE /api/tenants/{tenantId}
 Authorization: Bearer <jwt>
@@ -264,6 +272,8 @@ Response:
   "createdAt": "2025-01-08T12:00:00Z"
 }
 ```
+
+Only owner or admin can create invitations.
 
 **List Pending Invitations**
 ```
@@ -351,23 +361,30 @@ Authorization: Bearer <jwt>
 
 ## Authorization Rules
 
+Same rules for personal and workspace tenants:
+
 | Action | Owner | Admin | Member |
 |--------|-------|-------|--------|
 | Read tenant | ✓ | ✓ | ✓ |
 | Update name | ✓ | ✗ | ✗ |
 | Delete tenant | ✓ | ✗ | ✗ |
-| Create invites | ✓ | ✓ | ✗ |
+| Create invites | ✓ | ✓ (workspace only) | ✗ |
 | Change member roles | ✓ | ✗ | ✗ |
 | Remove members | ✓ | ✓ | ✗ |
 | View members | ✓ | ✓ | ✓ |
 | Access data | ✓ | ✓ | ✓ |
 | Remove self | ✓ (no) | ✓ | ✓ |
 
-**Owner Rules:**
+**Owner Rules (Universal):**
 - Owner cannot be removed
 - Owner cannot be downgraded (role change not allowed)
 - Only owner can delete tenant
 - Only owner can change member roles
+
+**Invitation Rules:**
+- Invitations only work for workspace tenants (`isPersonal: false`)
+- Personal tenants cannot accept invitations yet (future enhancement)
+- Attempting to invite to personal tenant returns 400
 
 ---
 

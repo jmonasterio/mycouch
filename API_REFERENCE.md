@@ -358,6 +358,401 @@ The following endpoints return `403 Forbidden` to prevent tenant bypass:
 - `/_global_changes` - Cross-database changes
 - Design document operations (except queries)
 
+## Tenant & Invitation Management
+
+All endpoints require a valid Clerk JWT token in the Authorization header.
+
+### Create Tenant (Workspace)
+
+**POST /api/tenants**
+
+Creates a new workspace tenant owned by the requesting user.
+
+**Request:**
+```json
+{
+  "name": "Workspace Name"
+}
+```
+
+**Response (201 Created):**
+```json
+{
+  "_id": "tenant_abc123",
+  "type": "tenant",
+  "name": "Workspace Name",
+  "applicationId": "roady",
+  "userId": "user_abc123",
+  "userIds": ["user_abc123"],
+  "createdAt": "2025-01-08T12:00:00Z",
+  "metadata": {
+    "createdBy": "user_abc123",
+    "autoCreated": false
+  }
+}
+```
+
+**Response (400 Bad Request):**
+```json
+{
+  "detail": "Tenant name is required"
+}
+```
+
+### List User's Tenants
+
+**GET /api/my-tenants**
+
+Lists all tenants the user has access to (personal + shared workspaces).
+
+**Response (200 OK):**
+```json
+{
+  "tenants": [
+    {
+      "tenantId": "tenant_xyz",
+      "name": "Alice's Workspace",
+      "role": "owner",
+      "personal": true,
+      "userIds": ["user_abc123"],
+      "joinedAt": "2025-01-08T12:00:00Z"
+    },
+    {
+      "tenantId": "tenant_1",
+      "name": "Workspace Name",
+      "role": "member",
+      "personal": false,
+      "userIds": ["user_abc123", "user_def456"],
+      "joinedAt": "2025-01-09T10:00:00Z"
+    }
+  ],
+  "activeTenantId": "tenant_xyz"
+}
+```
+
+### Get Tenant Details
+
+**GET /api/tenants/{tenantId}**
+
+Returns full tenant details including members and their roles.
+
+**Response (200 OK):**
+```json
+{
+  "_id": "tenant_1",
+  "type": "tenant",
+  "name": "Workspace Name",
+  "userId": "user_abc123",
+  "userIds": ["user_abc123", "user_def456"],
+  "members": [
+    {
+      "userId": "user_abc123",
+      "email": "alice@example.com",
+      "role": "owner",
+      "joinedAt": "2025-01-08T12:00:00Z"
+    },
+    {
+      "userId": "user_def456",
+      "email": "bob@example.com",
+      "role": "member",
+      "joinedAt": "2025-01-09T10:00:00Z"
+    }
+  ],
+  "createdAt": "2025-01-08T12:00:00Z"
+}
+```
+
+**Response (403 Forbidden - No Access):**
+```json
+{
+  "detail": "You do not have access to this tenant"
+}
+```
+
+**Response (404 Not Found):**
+```json
+{
+  "detail": "Tenant not found"
+}
+```
+
+### Update Tenant
+
+**PUT /api/tenants/{tenantId}**
+
+Update tenant name (owner only).
+
+**Request:**
+```json
+{
+  "name": "New Workspace Name"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "_id": "tenant_1",
+  "name": "New Workspace Name",
+  "updatedAt": "2025-01-08T13:00:00Z"
+}
+```
+
+**Response (403 Forbidden):**
+```json
+{
+  "detail": "Only owner can update tenant"
+}
+```
+
+### Delete Tenant
+
+**DELETE /api/tenants/{tenantId}**
+
+Soft delete a tenant (owner only). Personal tenants cannot be deleted.
+
+**Response (204 No Content)**
+
+**Response (400 Bad Request - Cannot Delete Personal):**
+```json
+{
+  "detail": "Cannot delete personal tenant"
+}
+```
+
+**Response (403 Forbidden):**
+```json
+{
+  "detail": "Only owner can delete tenant"
+}
+```
+
+### Create Invitation
+
+**POST /api/tenants/{tenantId}/invitations**
+
+Invite a user to a workspace (owner/admin only). Invitations cannot be created for personal tenants.
+
+**Request:**
+```json
+{
+  "email": "newuser@example.com",
+  "role": "member"
+}
+```
+
+**Response (201 Created):**
+```json
+{
+  "_id": "invite_abc123",
+  "tenantId": "tenant_1",
+  "tenantName": "Workspace Name",
+  "email": "newuser@example.com",
+  "role": "member",
+  "status": "pending",
+  "token": "sk_abcdef123456...",
+  "inviteLink": "https://app.example.com/join?invite=sk_...",
+  "expiresAt": "2025-01-15T12:00:00Z",
+  "createdAt": "2025-01-08T12:00:00Z"
+}
+```
+
+**Response (400 Bad Request - Personal Tenant):**
+```json
+{
+  "detail": "Cannot invite users to personal tenant"
+}
+```
+
+**Response (403 Forbidden):**
+```json
+{
+  "detail": "Only owner/admin can create invitations"
+}
+```
+
+### List Invitations
+
+**GET /api/tenants/{tenantId}/invitations?status=pending**
+
+List pending invitations for a tenant (owner/admin only).
+
+**Query Parameters:**
+- `status` (optional): `pending`, `accepted`, `revoked`
+
+**Response (200 OK):**
+```json
+[
+  {
+    "_id": "invite_abc123",
+    "email": "newuser@example.com",
+    "role": "member",
+    "status": "pending",
+    "createdAt": "2025-01-08T12:00:00Z",
+    "expiresAt": "2025-01-15T12:00:00Z"
+  }
+]
+```
+
+### Preview Invitation
+
+**GET /api/invitations/preview?token=sk_...**
+
+Preview invitation details without authentication. Used to show invitation info before user signs in.
+
+**Response (200 OK):**
+```json
+{
+  "tenantName": "Workspace Name",
+  "role": "member",
+  "isValid": true,
+  "expiresAt": "2025-01-15T12:00:00Z"
+}
+```
+
+**Response (400 Bad Request - Invalid Token):**
+```json
+{
+  "detail": "Invalid or expired invitation"
+}
+```
+
+### Accept Invitation
+
+**POST /api/invitations/accept**
+
+Accept an invitation using token and user's Clerk ID. No authentication required.
+
+**Request:**
+```json
+{
+  "token": "sk_abcdef123456...",
+  "clerkUserId": "user_def456"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "tenantId": "tenant_1",
+  "tenantName": "Workspace Name",
+  "role": "member"
+}
+```
+
+**Response (400 Bad Request - Invalid Token):**
+```json
+{
+  "detail": "Invalid or expired invitation"
+}
+```
+
+**Response (400 Bad Request - Token Already Used):**
+```json
+{
+  "detail": "Invitation has already been accepted"
+}
+```
+
+**Response (400 Bad Request - Email Mismatch):**
+```json
+{
+  "detail": "Invitation email does not match your account"
+}
+```
+
+### Revoke Invitation
+
+**DELETE /api/tenants/{tenantId}/invitations/{inviteId}**
+
+Revoke a pending invitation (owner/admin only).
+
+**Response (204 No Content)**
+
+**Response (403 Forbidden):**
+```json
+{
+  "detail": "Only owner/admin can revoke invitations"
+}
+```
+
+### Resend Invitation
+
+**POST /api/tenants/{tenantId}/invitations/{inviteId}/resend**
+
+Resend invitation email (owner/admin only).
+
+**Response (200 OK):**
+```json
+{
+  "_id": "invite_abc123",
+  "email": "newuser@example.com",
+  "status": "pending",
+  "token": "sk_...",
+  "inviteLink": "https://app.example.com/join?invite=sk_...",
+  "expiresAt": "2025-01-15T12:00:00Z"
+}
+```
+
+### Change Member Role
+
+**PUT /api/tenants/{tenantId}/members/{userId}/role**
+
+Change a member's role (owner only). Cannot change owner role.
+
+**Request:**
+```json
+{
+  "role": "admin"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "userId": "user_def456",
+  "role": "admin",
+  "updatedAt": "2025-01-08T13:00:00Z"
+}
+```
+
+**Response (400 Bad Request - Cannot Change Owner):**
+```json
+{
+  "detail": "Cannot change owner role"
+}
+```
+
+**Response (403 Forbidden):**
+```json
+{
+  "detail": "Only owner can change member roles"
+}
+```
+
+### Remove Member
+
+**DELETE /api/tenants/{tenantId}/members/{userId}**
+
+Remove a member from tenant (owner/admin only). Cannot remove owner.
+
+**Response (204 No Content)**
+
+**Response (400 Bad Request - Cannot Remove Owner):**
+```json
+{
+  "detail": "Cannot remove owner from tenant"
+}
+```
+
+**Response (403 Forbidden):**
+```json
+{
+  "detail": "Only owner/admin can remove members"
+}
+```
+
 ## Couch-Sitter Admin Access
 
 The `couch-sitter` database has special privileges:
