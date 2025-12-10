@@ -425,7 +425,9 @@ class InviteService:
         invited_by: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Create a tenant_user_mapping document for role tracking.
+        DEPRECATED: This method no longer creates tenant_user_mapping documents.
+        Role is now stored in user.tenants[] array (single source of truth).
+        This method is kept for backward compatibility but is a no-op.
         
         Args:
             tenant_id: Tenant ID
@@ -434,31 +436,7 @@ class InviteService:
             invited_by: User ID of the inviter
             
         Returns:
-            Mapping document
-            
-        Raises:
-            httpx.HTTPError: If database operation fails
+            Empty dict (no document created)
         """
-        mapping_id = f"tenant_user_mapping:{tenant_id}:{user_id}"
-        current_time = datetime.now(timezone.utc).isoformat()
-        
-        mapping_doc = {
-            "_id": mapping_id,
-            "type": "tenant_user_mapping",
-            "tenantId": tenant_id,
-            "userId": user_id,
-            "role": role,
-            "joinedAt": current_time,
-            "invitedBy": invited_by,
-            "acceptedAt": current_time if invited_by else None
-        }
-        
-        try:
-            response = await self._make_request("PUT", mapping_id, json=mapping_doc)
-            created = response.json()
-            logger.info(f"Created tenant_user_mapping: {mapping_id}")
-            return mapping_doc
-            
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Failed to create tenant_user_mapping: {e}")
-            raise
+        logger.info(f"create_tenant_user_mapping called but is deprecated (no-op). Role should be in user.tenants[]")
+        return {}

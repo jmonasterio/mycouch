@@ -163,6 +163,9 @@ class CouchSitterService:
             docs = result.get("docs", [])
             if docs:
                 user_doc = docs[0]
+                if not user_doc.get("_id"):
+                    logger.error(f"Found user document but missing _id: {user_doc}")
+                    return None
                 logger.debug(f"Found user: {user_doc.get('_id')}")
                 return user_doc
             else:
@@ -171,13 +174,13 @@ class CouchSitterService:
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                logger.debug(f"User not found: {sub_hash}")
+                logger.debug(f"User not found (404): {sub_hash}")
                 return None
             else:
-                logger.error(f"Error finding user {sub_hash}: {e}")
+                logger.error(f"Error finding user {sub_hash}: HTTP {e.response.status_code}")
                 raise
         except Exception as e:
-            logger.error(f"Unexpected error finding user {sub_hash}: {e}")
+            logger.error(f"Unexpected error finding user {sub_hash}: {type(e).__name__}: {e}")
             return None
 
     async def find_application_by_db_name(self, db_name: str) -> Optional[Dict[str, Any]]:
@@ -624,9 +627,11 @@ class CouchSitterService:
 
         # Regular app users: create personal tenant
         # Try to find existing user
+        logger.info(f"Looking for existing user with sub_hash: {sub_hash}")
         user_doc = await self.find_user_by_sub_hash(sub_hash)
 
         if user_doc:
+            logger.info(f"Found existing user document: {user_doc.get('_id')}")
             # User exists - check if they have the new multi-tenant schema
             tenants = user_doc.get("tenants", [])
             personal_tenant_id = user_doc.get("personalTenantId")
@@ -1149,40 +1154,35 @@ class CouchSitterService:
             created = response.json()
             logger.info(f"Created workspace tenant: {tenant_id} owned by {user_id}")
 
-            # Create tenant_user_mapping for owner
-            mapping_id = f"tenant_user_mapping:{tenant_id}:{user_id}"
-            mapping_doc = {
-                "_id": mapping_id,
-                "type": "tenant_user_mapping",
-                "tenantId": tenant_id,
-                "userId": user_id,
-                "role": "owner",
-                "joinedAt": current_time
-            }
-            
-            await self._make_request("PUT", mapping_id, json=mapping_doc)
-            logger.info(f"Created owner mapping: {mapping_id}")
+            # NOTE: tenant_user_mapping documents are no longer created here.
+            # Role is now extracted from user.tenants[] array (single source of truth)
 
             # Update user's tenantIds list (multi-tenant schema)
-            # Try to find user by direct lookup first (for users with user_id format),
-            # then by hashed lookup (for newer users with hashed format)
-            user_doc = None
-            
-            # First try direct lookup using the user_id
+            # user_id is in format "user_{hash}" - directly lookup the user document
+            logger.info(f"DEBUG: Looking up user document with ID: {user_id}")
             try:
                 response = await self._make_request("GET", user_id)
                 user_doc = response.json()
-                logger.debug(f"Found user by direct lookup: {user_id}")
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code != 404:
-                    raise
                 
-                # If not found, try hashed lookup
-                # Extract the actual sub from user_id (format: "user_<sub>")
-                sub_from_user_id = user_id.replace("user_", "") if user_id.startswith("user_") else user_id
-                user_doc = await self.find_user_by_sub_hash(self._hash_sub(sub_from_user_id))
-                if user_doc:
-                    logger.debug(f"Found user by hash lookup for sub: {sub_from_user_id}")
+                # Validate the response has required fields
+                if not user_doc:
+                    logger.error(f"CRITICAL: User lookup returned empty response for {user_id}")
+                    user_doc = None
+                elif not user_doc.get("_id"):
+                    logger.error(f"CRITICAL: User lookup returned document without _id: {user_doc}")
+                    user_doc = None
+                else:
+                    logger.info(f"SUCCESS: Found user document: {user_id}, tenantIds before: {user_doc.get('tenantIds', [])}")
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    logger.error(f"CRITICAL: User not found: {user_id} - this should not happen as user should be created during auth")
+                    user_doc = None
+                else:
+                    logger.error(f"ERROR: Looking up user {user_id}: HTTP {e.response.status_code}")
+                    raise
+            except Exception as e:
+                logger.error(f"ERROR: Failed to find user {user_id}: {type(e).__name__}: {e}")
+                user_doc = None
             
             if user_doc:
                 tenant_ids = user_doc.get("tenantIds", [])
@@ -1191,7 +1191,11 @@ class CouchSitterService:
                     user_doc["tenantIds"] = tenant_ids
                     user_doc["updatedAt"] = current_time
                     await self._make_request("PUT", user_doc["_id"], json=user_doc)
-                    logger.info(f"Added tenant {tenant_id} to user {user_id}'s tenantIds")
+                    logger.info(f"SUCCESS: Added tenant {tenant_id} to user {user_id}'s tenantIds. New list: {tenant_ids}")
+                else:
+                    logger.info(f"INFO: Tenant {tenant_id} already in user {user_id}'s tenantIds")
+            else:
+                logger.error(f"CRITICAL: Skipping tenantIds update - user {user_id} not found in database")
 
             return tenant_doc
 
@@ -1266,22 +1270,38 @@ class CouchSitterService:
                 updated = response.json()
                 logger.info(f"Added user {user_id} to tenant {tenant_id}")
 
-            # Create tenant_user_mapping
-            mapping_id = f"tenant_user_mapping:{tenant_id}:{user_id}"
-            current_time = datetime.now(timezone.utc).isoformat()
-            
-            mapping_doc = {
-                "_id": mapping_id,
-                "type": "tenant_user_mapping",
-                "tenantId": tenant_id,
-                "userId": user_id,
-                "role": role,
-                "joinedAt": current_time,
-                "acceptedAt": current_time
-            }
-
-            await self._make_request("PUT", mapping_id, json=mapping_doc)
-            logger.info(f"Created mapping: {mapping_id} with role {role}")
+            # Update user's tenants array with the role (single source of truth)
+            try:
+                response = await self._make_request("GET", user_id)
+                user_doc = response.json()
+                
+                tenants = user_doc.get("tenants", [])
+                # Check if user already has this tenant
+                tenant_entry = next((t for t in tenants if t.get("tenantId") == tenant_id), None)
+                
+                if not tenant_entry:
+                    current_time = datetime.now(timezone.utc).isoformat()
+                    tenant_entry = {
+                        "tenantId": tenant_id,
+                        "role": role,
+                        "personal": False,
+                        "joinedAt": current_time
+                    }
+                    tenants.append(tenant_entry)
+                    user_doc["tenants"] = tenants
+                    user_doc["updatedAt"] = current_time
+                    await self._make_request("PUT", user_id, json=user_doc)
+                    logger.info(f"Added tenant {tenant_id} with role '{role}' to user {user_id}")
+                else:
+                    logger.debug(f"User {user_id} already member of tenant {tenant_id}")
+                    
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    logger.warning(f"User {user_id} not found when adding to tenant {tenant_id}")
+                    # User may not exist yet, which is okay during invitations
+                else:
+                    logger.error(f"Failed to update user {user_id} tenants: {e}")
+                    raise
 
             return tenant
 
@@ -1311,4 +1331,38 @@ class CouchSitterService:
                 logger.debug(f"Mapping not found: {mapping_id}")
                 return None
             logger.error(f"Error fetching mapping {mapping_id}: {e}")
+            raise
+
+    async def get_user_role_for_tenant(self, user_id: str, tenant_id: str) -> Optional[str]:
+        """
+        Get a user's role for a specific tenant by extracting from user.tenants[] array.
+        This eliminates the need to query redundant tenant_user_mapping documents.
+
+        Args:
+            user_id: User ID
+            tenant_id: Tenant ID
+
+        Returns:
+            Role string (owner, admin, member) if user is a member of the tenant, None otherwise
+        """
+        try:
+            response = await self._make_request("GET", user_id)
+            user_doc = response.json()
+            
+            # Extract role from user.tenants array
+            tenants = user_doc.get("tenants", [])
+            for tenant in tenants:
+                if tenant.get("tenantId") == tenant_id:
+                    role = tenant.get("role")
+                    logger.debug(f"Found user {user_id} with role '{role}' for tenant {tenant_id}")
+                    return role
+            
+            logger.debug(f"User {user_id} is not a member of tenant {tenant_id}")
+            return None
+            
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.debug(f"User not found: {user_id}")
+                return None
+            logger.error(f"Error fetching user {user_id}: {e}")
             raise

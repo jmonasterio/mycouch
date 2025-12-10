@@ -1102,13 +1102,138 @@ Clerk Dashboard → Sessions → Customize session token
         raise HTTPException(status_code=500, detail="Failed to get tenant information")
 
 
+@app.post("/my-tenants")
+@limiter.limit("10/minute")
+async def create_my_tenant(
+    request: Request,
+    tenant_request: Dict[str, Any] = Body(...),
+    authorization: Optional[str] = Header(None)
+):
+    """Create a new workspace tenant for the authenticated user."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header format")
+
+    token = authorization.split(" ", 1)[1]
+    try:
+        user_info = await clerk_service.get_user_from_jwt(token)
+        if not user_info:
+            raise HTTPException(status_code=401, detail="Invalid JWT token")
+
+        name = tenant_request.get("name", "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Tenant name is required")
+
+        sub = user_info.get("sub")
+        email = user_info.get("email")
+        name_from_jwt = user_info.get("name")
+        issuer = user_info.get("iss")
+        
+        requested_db_name = "roady"
+        if issuer and issuer in APPLICATIONS:
+            requested_db_name = APPLICATIONS[issuer].get("databaseNames", ["roady"])[0]
+        
+        logger.info(f"Creating tenant '{name}' for user {sub}")
+        
+        user_info_from_db = await couch_sitter_service.ensure_user_exists(
+            sub=sub, email=email, name=name_from_jwt, requested_db_name=requested_db_name
+        )
+        
+        tenant = await couch_sitter_service.create_workspace_tenant(
+            user_id=user_info_from_db.user_id, name=name, application_id=requested_db_name
+        )
+        
+        return {
+            "tenantId": tenant.get("_id"),
+            "_id": tenant.get("_id"),
+            "name": tenant.get("name"),
+            "type": tenant.get("type"),
+            "userId": tenant.get("userId"),
+            "userIds": tenant.get("userIds"),
+            "createdAt": tenant.get("createdAt"),
+            "metadata": tenant.get("metadata")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating tenant: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create tenant")
+
+
+@app.delete("/my-tenant/{tenant_id}")
+@limiter.limit("10/minute")
+async def delete_my_tenant(
+    request: Request,
+    tenant_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """Delete one of the user's tenants."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header format")
+
+    token = authorization[7:]
+    try:
+        user_info = await clerk_service.get_user_from_jwt(token)
+        if not user_info:
+            raise HTTPException(status_code=401, detail="Invalid JWT token")
+
+        sub = user_info.get("sub")
+        email = user_info.get("email")
+        name_from_jwt = user_info.get("name")
+        issuer = user_info.get("iss")
+        
+        requested_db_name = "roady"
+        if issuer and issuer in APPLICATIONS:
+            requested_db_name = APPLICATIONS[issuer].get("databaseNames", ["roady"])[0]
+        
+        # Get the correct user_id from CouchDB (format: user_{hash})
+        user_info_from_db = await couch_sitter_service.ensure_user_exists(
+            sub=sub, email=email, name=name_from_jwt, requested_db_name=requested_db_name
+        )
+        user_id = user_info_from_db.user_id
+        
+        tenants, personal_tenant_id = await couch_sitter_service.get_user_tenants(user_info["sub"])
+
+        if not tenants:
+            raise HTTPException(status_code=404, detail="No tenants found")
+
+        user_tenant_ids = [t["tenantId"] for t in tenants]
+        if tenant_id not in user_tenant_ids:
+            raise HTTPException(status_code=403, detail="This tenant does not belong to you")
+
+        if tenant_id == personal_tenant_id:
+            raise HTTPException(status_code=400, detail="Cannot delete personal tenant")
+
+        tenant = await couch_sitter_service.get_tenant(tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+
+        if tenant.get("userId") != user_id:
+            raise HTTPException(status_code=403, detail="Only owner can delete tenant")
+
+        user_ids = tenant.get("userIds", [])
+        other_members = [uid for uid in user_ids if uid != user_id]
+        if other_members:
+            raise HTTPException(status_code=400, detail=f"Cannot delete tenant with other members. Remove {len(other_members)} member(s) first.")
+
+        from datetime import datetime, timezone
+        tenant["deletedAt"] = datetime.now(timezone.utc).isoformat()
+        await couch_sitter_service._make_request("PUT", tenant_id, json=tenant)
+
+        logger.info(f"User {user_id} deleted tenant {tenant_id}")
+        return {"success": True, "message": "Tenant deleted successfully", "deletedTenantId": tenant_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting tenant {tenant_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete tenant")
 
 @app.post("/choose-tenant")
 @limiter.limit("10/minute")
 async def choose_tenant(
-    request: Request,
-    tenant_request: Dict[str, str] = Body(...),
-    authorization: Optional[str] = Header(None)
+request: Request,
+tenant_request: Dict[str, str] = Body(...),
+authorization: Optional[str] = Header(None)
 ):
     """
     Set the active tenant for the authenticated user.

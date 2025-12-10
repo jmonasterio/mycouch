@@ -1,79 +1,67 @@
-# Agent Commands
+# MyCouch Agent Guidelines
+
+## Quick Commands
+
+**Build & Test:**
+- `uv sync --all-extras` - Install all dependencies (dev + test)
+- `uv run pytest tests/ -v` - Run all tests
+- `uv run pytest tests/test_main.py::TestClass::test_method -v` - Run single test
+- `make test-cov` - Run tests with coverage report
+- `make lint` && `make format` - Lint and format code
+
+**Running:**
+- `make dev-run` - Start proxy with auto-reload on :5985
+- `make run` - Start production proxy
+
+## Architecture (MyCouch + Roady)
+
+**MyCouch**: FastAPI CouchDB proxy with JWT auth (Clerk RS256)
+- Port 5985 (proxy) ← Frontend
+- Port 5984 (CouchDB) ← Proxy only
+- Databases: `couch-sitter` (users/tenants/apps), `roady` (band data)
+- Multi-tenant isolation via JWT claims
+
+**Roady**: PWA band equipment checklist
+- Uses PouchDB for offline-first sync
+- Manages multiple tenants (bands) per user
+- User documents in `couch-sitter`, tenant/equipment in `roady`
+
+## File Structure
+
+```
+src/couchdb_jwt_proxy/
+  main.py (endpoints, JWT validation, proxy logic)
+  clerk.py (Clerk Backend API, user metadata)
+  auth.py (JWT verification)
+  couch_sitter_service.py (user/tenant management)
+  tenant_routes.py (tenant APIs)
+  invite_service.py (invitations)
+tests/ (pytest + asyncio)
+```
+
+## Code Standards
+
+**Python**: PEP 8, type hints, async/await, docstrings
+**Imports**: `from typing import Optional, Dict, Any`; `import httpx`, `from fastapi import HTTPException`
+**Errors**: Always raise `HTTPException` with status_code + detail
+**Logging**: Use `logger.info()`, `logger.error()` (config via LOG_LEVEL env var)
+**Multi-tenant**: Extract tenant_id from JWT claim, never user input
+
+## Critical Notes
+
+- User docs in `couch-sitter` DB (format: `user_{sub_hash}`)
+- Tenant/band docs in `roady` DB (format: `tenant_{uuid}`)
+- `tenant_user_mapping` documents are redundant (being removed per mycouch-ba4)
+- Always ensure user_id comes from `ensure_user_exists()`, not JWT directly
+- Test with DAL layer (no real DB corruption)
 
 ## Issue Tracking (bd)
 
-**bd - Dependency-Aware Issue Tracker**
+- `bd list --status open` - See open work
+- `bd ready` - Show unblocked issues
+- `bd create "Task name" -p 2 -t feature` - Create new issue
+- `bd close mycouch-xxx --reason "Fixed in PR"` - Close issue
 
-Issues chained together like beads.
+## Git Workflow
 
-### GETTING STARTED
-- `bd init` - Initialize bd in your project
-  - Creates .beads/ directory with project-specific database
-  - Auto-detects prefix from directory name (e.g., myapp-1, myapp-2)
-- `bd init --prefix api` - Initialize with custom prefix
-  - Issues will be named: api-1, api-2, ...
-
-### CREATING ISSUES
-- `bd create "Fix login bug"`
-- `bd create "Add auth" -p 0 -t feature`
-- `bd create "Write tests" -d "Unit tests for auth" --assignee alice`
-
-### VIEWING ISSUES
-- `bd list` - List all issues
-- `bd list --status open` - List by status
-- `bd list --priority 0` - List by priority (0-4, 0=highest)
-- `bd show bd-1` - Show issue details
-
-### MANAGING DEPENDENCIES
-- `bd dep add bd-1 bd-2` - Add dependency (bd-2 blocks bd-1)
-- `bd dep tree bd-1` - Visualize dependency tree
-- `bd dep cycles` - Detect circular dependencies
-
-### DEPENDENCY TYPES
-- `blocks` - Task B must complete before task A
-- `related` - Soft connection, doesn't block progress
-- `parent-child` - Epic/subtask hierarchical relationship
-- `discovered-from` - Auto-created when AI discovers related work
-
-### READY WORK
-- `bd ready` - Show issues ready to work on
-  - Ready = status is 'open' AND no blocking dependencies
-  - Perfect for agents to claim next work!
-
-### UPDATING ISSUES
-- `bd update bd-1 --status in_progress`
-- `bd update bd-1 --priority 0`
-- `bd update bd-1 --assignee bob`
-
-### CLOSING ISSUES
-- `bd close bd-1`
-- `bd close bd-2 bd-3 --reason "Fixed in PR #42"`
-
-### DATABASE LOCATION
-bd automatically discovers your database:
-1. `--db /path/to/db.db` flag
-2. `$BEADS_DB` environment variable
-3. `.beads/*.db` in current directory or ancestors
-4. `~/.beads/default.db` as fallback
-
-### AGENT INTEGRATION
-bd is designed for AI-supervised workflows:
-- Agents create issues when discovering new work
-- `bd ready` shows unblocked work ready to claim
-- Use `--json` flags for programmatic parsing
-- Dependencies prevent agents from duplicating effort
-
-### DATABASE EXTENSION
-Applications can extend bd's SQLite database:
-- Add your own tables (e.g., myapp_executions)
-- Join with issues table for powerful queries
-- See database extension docs for integration patterns: https://github.com/steveyegge/beads/blob/main/EXTENDING.md
-
-### GIT WORKFLOW (AUTO-SYNC)
-bd automatically keeps git in sync:
-- ✓ Export to JSONL after CRUD operations (5s debounce)
-- ✓ Import from JSONL when newer than DB (after git pull)
-- ✓ Works seamlessly across machines and team members
-- No manual export/import needed!
-
-Disable with: `--no-auto-flush` or `--no-auto-import`
+**DO NOT commit/push.** User controls commits. Apply changes → stage in git → user reviews → user commits.

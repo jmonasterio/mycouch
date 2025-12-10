@@ -7,6 +7,7 @@ Extracts user info from JWT for API routes.
 from fastapi import Depends, HTTPException, Header
 from typing import Optional, Dict, Any
 import logging
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +59,10 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[
             raise HTTPException(status_code=401, detail="Invalid token: missing sub claim")
 
         # Convert sub to user_id format used in database
-        # Assuming sub is from Clerk and we hash it as user_{hash}
-        # This assumes the couch_sitter_service has already created the user
-        user_id = f"user_{sub}"  # This will be matched against user docs
+        # CRITICAL: Hash the sub to create the database user ID
+        # This matches the format used in ensure_user_exists()
+        sub_hash = hashlib.sha256(sub.encode('utf-8')).hexdigest()
+        user_id = f"user_{sub_hash}"  # Correct format: user_{hash}
 
         return {
             "user_id": user_id,

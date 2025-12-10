@@ -307,10 +307,9 @@ class TestTenantManagement:
         assert "user_bob" in result["userIds"]
         assert len(result["userIds"]) == 2
         
-        # Verify mapping was created
-        mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, "user_bob")
-        assert mapping is not None
-        assert mapping["role"] == "member"
+        # Verify role was added to user's tenants array
+        role = await couch_sitter_service.get_user_role_for_tenant("user_bob", tenant_id)
+        assert role == "member"
 
 
 # ============ INTEGRATION TESTS: Invitation Flow ============

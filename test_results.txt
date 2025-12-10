@@ -1,0 +1,13 @@
+........................................................................ [ 32%]
+.........ssss...s..s...............................................s.... [ 65%]
+........................................................................ [ 98%]
+...                                                                      [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_jwt_template_validation.py:38: Requires full app context with main.py endpoints
+SKIPPED [1] tests\test_jwt_template_validation.py:77: Requires full app context with main.py endpoints
+SKIPPED [1] tests\test_jwt_template_validation.py:115: Requires full app context with main.py endpoints
+SKIPPED [1] tests\test_jwt_template_validation.py:139: Requires full app context with main.py endpoints
+SKIPPED [1] tests\test_jwt_template_validation.py:210: Requires full app context with main.py endpoints
+SKIPPED [1] tests\test_jwt_template_validation.py:278: Requires full app context with main.py endpoints
+SKIPPED [1] tests\test_network_integration.py:33: CouchDB not available for integration testing
+212 passed, 7 skipped in 65.26s (0:01:05)
