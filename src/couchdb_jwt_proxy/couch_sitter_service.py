@@ -1190,8 +1190,12 @@ class CouchSitterService:
                     tenant_ids.append(tenant_id)
                     user_doc["tenantIds"] = tenant_ids
                     user_doc["updatedAt"] = current_time
-                    await self._make_request("PUT", user_doc["_id"], json=user_doc)
-                    logger.info(f"SUCCESS: Added tenant {tenant_id} to user {user_id}'s tenantIds. New list: {tenant_ids}")
+                    try:
+                        await self._make_request("PUT", user_doc["_id"], json=user_doc)
+                        logger.info(f"SUCCESS: Added tenant {tenant_id} to user {user_id}'s tenantIds. New list: {tenant_ids}")
+                    except Exception as e:
+                        logger.error(f"CRITICAL: Failed to update user {user_id} with new tenant {tenant_id}: {e}")
+                        raise
                 else:
                     logger.info(f"INFO: Tenant {tenant_id} already in user {user_id}'s tenantIds")
             else:

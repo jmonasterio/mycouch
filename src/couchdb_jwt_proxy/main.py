@@ -28,6 +28,8 @@ from .dal import create_dal
 from .auth_log_service import AuthLogService
 from .invite_service import InviteService
 from .tenant_routes import create_tenant_router
+from .virtual_tables import VirtualTableHandler, VirtualTableMapper
+from .bootstrap import BootstrapManager
 from . import auth_middleware
 
 # Load environment variables
@@ -186,6 +188,11 @@ clerk_service = ClerkService(
 
 # Set clerk_service for auth_middleware
 auth_middleware.set_clerk_service(clerk_service)
+
+# Initialize Virtual Tables and Bootstrap managers
+virtual_table_handler = VirtualTableHandler(dal)
+bootstrap_manager = BootstrapManager(dal)
+logger.info("✓ Initialized virtual tables and bootstrap managers")
 
 # Initialize Auth Log Service (optional - only if log database URL is configured)
 auth_log_service = None
@@ -447,8 +454,7 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
             logger.error(f"Failed to get tenant info for couch-sitter sub '{sub}': {e}")
             raise
 
-    # For roady, strictly get active tenant from JWT claims
-    # CRITICAL SECURITY FIX: Remove fallback mechanism entirely
+    # For roady, get active tenant from JWT
     logger.debug(f"Roady request - checking for active tenant in JWT for sub '{sub}'")
 
     # Check for active_tenant_id claim in JWT
@@ -462,12 +468,12 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
         logger.debug(f"Found active tenant in JWT claims: {active_tenant_id}")
         return active_tenant_id
     
-    # STRICT ENFORCEMENT: No fallback to backend API or personal tenant
-    # Reject request immediately if active_tenant_id claim is missing
-    logger.warning(f"Missing active_tenant_id in JWT for roady request from sub '{sub}' - rejecting request")
+    # Missing active_tenant_id - REJECT the request (CWE-287 security fix)
+    # No fallback to clerk API or bootstrap flow
+    logger.warning(f"SECURITY: Missing active_tenant_id in JWT for roady request from sub '{sub}' - rejecting request")
     raise HTTPException(
-        status_code=401, 
-        detail="Missing active_tenant_id claim in JWT. Please refresh your token and try again."
+        status_code=401,
+        detail="Missing active_tenant_id claim in token. Please refresh your authentication token and try again."
     )
 
 def is_system_doc(doc_id: str) -> bool:
@@ -916,317 +922,12 @@ async def initialize_applications():
 # Routes
 
 # Tenant Management Endpoints
-@app.get("/my-tenants")
-@limiter.limit("30/minute")
-async def get_my_tenants(
-    request: Request,
-    authorization: Optional[str] = Header(None)
-):
-    """
-    Get all tenants for the authenticated user.
-    This endpoint works for both roady and couch-sitter applications.
-    """
-    print("=" * 80, flush=True)
-    print("GET /my-tenants called", flush=True)
-    print("=" * 80, flush=True)
-    logger.info("=" * 80)
-    logger.info("GET /my-tenants called")
-    logger.info("=" * 80)
-    
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing authorization header")
-
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-    token = authorization.split(" ", 1)[1]
-
-    try:
-        # Validate JWT and extract user information
-        user_info = await clerk_service.get_user_from_jwt(token)
-        if not user_info:
-            raise HTTPException(status_code=401, detail="Invalid JWT token")
-
-        # Determine database name from issuer to ensure correct tenant type
-        issuer = user_info.get("iss")
-        
-        # Fallback: If name or email is missing, try to fetch from Clerk API
-        if (not user_info.get("email") or not user_info.get("name")) and clerk_service.is_configured():
-            logger.info(f"Missing email/name in JWT (email={user_info.get('email')}, name={user_info.get('name')}), fetching from Clerk API...")
-            details = await clerk_service.fetch_user_details(user_info["sub"], issuer)
-            if details:
-                logger.info(f"Fetched details from Clerk API: {details}")
-                if details.get("email"):
-                    user_info["email"] = details["email"]
-                if details.get("name"):
-                    user_info["name"] = details["name"]
-            else:
-                logger.warning(f"Failed to fetch user details from Clerk API for {user_info['sub']}")
-        elif not clerk_service.is_configured():
-            logger.warning("Clerk service not configured - cannot fetch missing user details")
-        else:
-            logger.info(f"User info complete from JWT: email={user_info.get('email')}, name={user_info.get('name')}")
-        
-        # CRITICAL: Validate that we have email and name before proceeding
-        if not user_info.get("email") or not user_info.get("name"):
-            warning_msg = f"""
-================================================================================
-WARNING: Missing required user fields in JWT
-================================================================================
-Email: {user_info.get('email')}
-Name: {user_info.get('name')}
-
-To fix this, configure your Clerk Session Token to include:
-{{
-    "active_tenant_id": "{{{{session.public_metadata.active_tenant_id}}}}",
-    "email": "{{{{user.primary_email_address}}}}",
-    "name": "{{{{user.full_name}}}}"
-}}
-
-Clerk Dashboard → Sessions → Customize session token
-================================================================================
-"""
-            logger.warning(warning_msg)
-            # Still raise error to prevent incomplete user creation
-            raise HTTPException(status_code=500, detail="Missing required fields: email and/or name. Check server logs for configuration instructions.")
-        
-        logger.info(f"DEBUG: Issuer from JWT: {issuer}")
-        logger.info(f"DEBUG: APPLICATIONS keys: {list(APPLICATIONS.keys())}")
-        
-        requested_db_name = None
-        
-        # Get app config from loaded applications (no fallback)
-        if not issuer:
-            logger.error("No issuer found in JWT")
-            raise HTTPException(status_code=401, detail="Invalid JWT: missing issuer")
-            
-        if issuer not in APPLICATIONS:
-            logger.error(f"Unknown issuer: {issuer}. Available issuers: {list(APPLICATIONS.keys())}")
-            raise HTTPException(status_code=401, detail=f"Unknown application issuer: {issuer}")
-        
-        app_config = APPLICATIONS[issuer]
-        if isinstance(app_config, dict):
-            dbs = app_config.get("databaseNames", [])
-            if dbs:
-                requested_db_name = dbs[0]
-        elif isinstance(app_config, list) and app_config:
-            requested_db_name = app_config[0]
-
-        logger.info(f"DEBUG: requested_db_name: {requested_db_name}")
-
-        # Resolve App ID from DB Name to support correct linking
-        app_doc = await couch_sitter_service.find_application_by_db_name(requested_db_name)
-        app_id = app_doc.get("_id") if app_doc else None
-        
-        # Ensure user exists (passing resolved ID if available)
-        creation_app_id = app_id or requested_db_name
-
-        # Get user's tenants from database
-        user_tenant_info = await couch_sitter_service.get_user_tenant_info(
-            sub=user_info["sub"],
-            email=user_info.get("email"),
-            name=user_info.get("name"),
-            requested_db_name=creation_app_id
-        )
-
-        # Get all tenants for this user (not just personal tenant)
-        tenants, personal_tenant_id = await couch_sitter_service.get_user_tenants(user_info["sub"])
-
-        # Log successful login event
-        if auth_log_service:
-            import asyncio
-            asyncio.create_task(auth_log_service.log_login(
-                user_id=user_info["user_id"],
-                tenant_id=user_tenant_info.tenant_id,
-                success=True,
-                ip=request.client.host if request.client else None,
-                user_agent=request.headers.get("user-agent"),
-                issuer=user_info.get("iss")
-            ))
-
-        # VALIDATION: Filter tenants for this application
-        # If no requested_db_name, we might want to return all, but for safety in roady context, 
-        # let's be strict if we know we are in an app context.
-        filtered_tenants = []
-        if requested_db_name:
-             logger.info(f"Filtering tenants for application: {requested_db_name} (AppID: {app_id})")
-             for t in tenants:
-                 t_app_id = t.get("applicationId")
-                 
-                 if requested_db_name == 'couch-sitter':
-                     filtered_tenants.append(t)
-                 # Match against DB name (legacy) OR Resolved App ID (correct)
-                 elif t_app_id == requested_db_name or (app_id and t_app_id == app_id):
-                     filtered_tenants.append(t)
-                 elif not t_app_id:
-                     logger.debug(f"Skipping tenant {t.get('tenantId')} without applicationId")
-        else:
-            # No specific app requested (unlikely with current JWT logic), return all
-            filtered_tenants = tenants
-
-        logger.info(f"Tenant filtering: {len(tenants)} -> {len(filtered_tenants)} tenants")
-
-        # Mark the active tenant
-        # Priority 1: App-specific Personal Tenant (from user_tenant_info) is a safe default
-        active_tenant_id = user_tenant_info.tenant_id
-        
-        # Priority 2: Active tenant from Clerk metadata (if valid for this app)
-        if clerk_service.is_configured() and user_info.get("session_id"):
-             clerk_active_tenant = await clerk_service.get_user_active_tenant(
-                 user_id=user_info["user_id"],
-                 session_id=user_info["session_id"],
-                 issuer=user_info.get("iss")
-             )
-             
-             if clerk_active_tenant:
-                 # VALIDATE: Does this tenant exist in our filtered list?
-                 # If we switched apps, we might have an active_tenant_id from the OLD app.
-                 # We must NOT use it if it's not accessible in the NEW app.
-                 is_valid = any(t["tenantId"] == clerk_active_tenant for t in filtered_tenants)
-                 
-                 if is_valid:
-                     active_tenant_id = clerk_active_tenant
-                     logger.info(f"Using valid active tenant from Clerk: {active_tenant_id}")
-                 else:
-                     logger.warning(f"Ignored active tenant {clerk_active_tenant} from Clerk - not valid for app {requested_db_name}")
-
-        return {
-            "tenants": filtered_tenants,
-            "activeTenantId": active_tenant_id,
-            "userId": user_tenant_info.user_id,
-            "sub": user_tenant_info.sub
-        }
-
-    except Exception as e:
-        logger.error(f"Error getting user tenants: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get tenant information")
+# NOTE: GET /my-tenants endpoint removed - use virtual endpoint /__tenants instead
+# POST /my-tenants endpoint removed - use virtual endpoint /__tenants instead
+# DELETE /my-tenant/{tenant_id} endpoint removed - use virtual endpoint /__tenants instead
 
 
-@app.post("/my-tenants")
-@limiter.limit("10/minute")
-async def create_my_tenant(
-    request: Request,
-    tenant_request: Dict[str, Any] = Body(...),
-    authorization: Optional[str] = Header(None)
-):
-    """Create a new workspace tenant for the authenticated user."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header format")
 
-    token = authorization.split(" ", 1)[1]
-    try:
-        user_info = await clerk_service.get_user_from_jwt(token)
-        if not user_info:
-            raise HTTPException(status_code=401, detail="Invalid JWT token")
-
-        name = tenant_request.get("name", "").strip()
-        if not name:
-            raise HTTPException(status_code=400, detail="Tenant name is required")
-
-        sub = user_info.get("sub")
-        email = user_info.get("email")
-        name_from_jwt = user_info.get("name")
-        issuer = user_info.get("iss")
-        
-        requested_db_name = "roady"
-        if issuer and issuer in APPLICATIONS:
-            requested_db_name = APPLICATIONS[issuer].get("databaseNames", ["roady"])[0]
-        
-        logger.info(f"Creating tenant '{name}' for user {sub}")
-        
-        user_info_from_db = await couch_sitter_service.ensure_user_exists(
-            sub=sub, email=email, name=name_from_jwt, requested_db_name=requested_db_name
-        )
-        
-        tenant = await couch_sitter_service.create_workspace_tenant(
-            user_id=user_info_from_db.user_id, name=name, application_id=requested_db_name
-        )
-        
-        return {
-            "tenantId": tenant.get("_id"),
-            "_id": tenant.get("_id"),
-            "name": tenant.get("name"),
-            "type": tenant.get("type"),
-            "userId": tenant.get("userId"),
-            "userIds": tenant.get("userIds"),
-            "createdAt": tenant.get("createdAt"),
-            "metadata": tenant.get("metadata")
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating tenant: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create tenant")
-
-
-@app.delete("/my-tenant/{tenant_id}")
-@limiter.limit("10/minute")
-async def delete_my_tenant(
-    request: Request,
-    tenant_id: str,
-    authorization: Optional[str] = Header(None)
-):
-    """Delete one of the user's tenants."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-    token = authorization[7:]
-    try:
-        user_info = await clerk_service.get_user_from_jwt(token)
-        if not user_info:
-            raise HTTPException(status_code=401, detail="Invalid JWT token")
-
-        sub = user_info.get("sub")
-        email = user_info.get("email")
-        name_from_jwt = user_info.get("name")
-        issuer = user_info.get("iss")
-        
-        requested_db_name = "roady"
-        if issuer and issuer in APPLICATIONS:
-            requested_db_name = APPLICATIONS[issuer].get("databaseNames", ["roady"])[0]
-        
-        # Get the correct user_id from CouchDB (format: user_{hash})
-        user_info_from_db = await couch_sitter_service.ensure_user_exists(
-            sub=sub, email=email, name=name_from_jwt, requested_db_name=requested_db_name
-        )
-        user_id = user_info_from_db.user_id
-        
-        tenants, personal_tenant_id = await couch_sitter_service.get_user_tenants(user_info["sub"])
-
-        if not tenants:
-            raise HTTPException(status_code=404, detail="No tenants found")
-
-        user_tenant_ids = [t["tenantId"] for t in tenants]
-        if tenant_id not in user_tenant_ids:
-            raise HTTPException(status_code=403, detail="This tenant does not belong to you")
-
-        if tenant_id == personal_tenant_id:
-            raise HTTPException(status_code=400, detail="Cannot delete personal tenant")
-
-        tenant = await couch_sitter_service.get_tenant(tenant_id)
-        if not tenant:
-            raise HTTPException(status_code=404, detail="Tenant not found")
-
-        if tenant.get("userId") != user_id:
-            raise HTTPException(status_code=403, detail="Only owner can delete tenant")
-
-        user_ids = tenant.get("userIds", [])
-        other_members = [uid for uid in user_ids if uid != user_id]
-        if other_members:
-            raise HTTPException(status_code=400, detail=f"Cannot delete tenant with other members. Remove {len(other_members)} member(s) first.")
-
-        from datetime import datetime, timezone
-        tenant["deletedAt"] = datetime.now(timezone.utc).isoformat()
-        await couch_sitter_service._make_request("PUT", tenant_id, json=tenant)
-
-        logger.info(f"User {user_id} deleted tenant {tenant_id}")
-        return {"success": True, "message": "Tenant deleted successfully", "deletedTenantId": tenant_id}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting tenant {tenant_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete tenant")
 
 @app.post("/choose-tenant")
 @limiter.limit("10/minute")
@@ -1653,6 +1354,260 @@ async def proxy_couchdb_streaming(
         stream_from_couchdb(),
         media_type="application/json"
     )
+
+# Add Virtual Tables Routes (BEFORE catch-all to ensure /__users/* and /__tenants/* match first)
+
+@app.get("/__users/{user_id}")
+async def get_user(user_id: str, authorization: Optional[str] = Header(None)):
+    """GET /__users/<id> - Get user document"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    return await virtual_table_handler.get_user(user_id, requesting_user_id)
+
+@app.put("/__users/{user_id}")
+async def update_user(user_id: str, request: Request, authorization: Optional[str] = Header(None)):
+    """PUT /__users/<id> - Update user document"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    body = await request.json()
+    return await virtual_table_handler.update_user(user_id, requesting_user_id, body)
+
+@app.delete("/__users/{user_id}")
+async def delete_user(user_id: str, authorization: Optional[str] = Header(None)):
+    """DELETE /__users/<id> - Soft-delete user document"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    return await virtual_table_handler.delete_user(user_id, requesting_user_id)
+
+@app.get("/__tenants/{tenant_id}")
+async def get_tenant(tenant_id: str, authorization: Optional[str] = Header(None)):
+    """GET /__tenants/<id> - Get tenant document"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    return await virtual_table_handler.get_tenant(tenant_id, requesting_user_id)
+
+@app.get("/__tenants")
+async def list_tenants(authorization: Optional[str] = Header(None)):
+    """GET /__tenants - List all tenants user is member of"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    return await virtual_table_handler.list_tenants(requesting_user_id)
+
+@app.post("/__tenants")
+async def create_tenant(request: Request, authorization: Optional[str] = Header(None)):
+    """POST /__tenants - Create new tenant"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    body = await request.json()
+    result = await virtual_table_handler.create_tenant(requesting_user_id, body)
+    return result
+
+@app.put("/__tenants/{tenant_id}")
+async def update_tenant(tenant_id: str, request: Request, authorization: Optional[str] = Header(None)):
+    """PUT /__tenants/<id> - Update tenant document"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    body = await request.json()
+    return await virtual_table_handler.update_tenant(tenant_id, requesting_user_id, body)
+
+@app.delete("/__tenants/{tenant_id}")
+async def delete_tenant(tenant_id: str, authorization: Optional[str] = Header(None)):
+    """DELETE /__tenants/<id> - Soft-delete tenant"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    # Get user's active_tenant_id for validation
+    active_tenant_id = payload.get("active_tenant_id")
+    
+    return await virtual_table_handler.delete_tenant(tenant_id, requesting_user_id, active_tenant_id or "")
+
+@app.get("/__users/_changes")
+async def user_changes(
+    request: Request,
+    authorization: Optional[str] = Header(None)
+):
+    """GET /__users/_changes - Get user document changes"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    # Extract query params
+    since = request.query_params.get("since", "0")
+    limit = request.query_params.get("limit")
+    include_docs = request.query_params.get("include_docs", "false").lower() == "true"
+    
+    return await virtual_table_handler.get_user_changes(
+        requesting_user_id,
+        since=since,
+        limit=int(limit) if limit else None,
+        include_docs=include_docs
+    )
+
+@app.post("/__users/_bulk_docs")
+async def user_bulk_docs(request: Request, authorization: Optional[str] = Header(None)):
+    """POST /__users/_bulk_docs - Bulk user operations"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    body = await request.json()
+    docs = body.get("docs", [])
+    
+    return await virtual_table_handler.bulk_docs_users(requesting_user_id, docs)
+
+@app.get("/__tenants/_changes")
+async def tenant_changes(
+    request: Request,
+    authorization: Optional[str] = Header(None)
+):
+    """GET /__tenants/_changes - Get tenant document changes"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    # Extract query params
+    since = request.query_params.get("since", "0")
+    limit = request.query_params.get("limit")
+    include_docs = request.query_params.get("include_docs", "false").lower() == "true"
+    
+    return await virtual_table_handler.get_tenant_changes(
+        requesting_user_id,
+        since=since,
+        limit=int(limit) if limit else None,
+        include_docs=include_docs
+    )
+
+@app.post("/__tenants/_bulk_docs")
+async def tenant_bulk_docs(request: Request, authorization: Optional[str] = Header(None)):
+    """POST /__tenants/_bulk_docs - Bulk tenant operations"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    
+    token = authorization[7:]
+    payload, error_reason = verify_clerk_jwt(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    
+    requesting_user_id = payload.get("sub")
+    if not requesting_user_id:
+        raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    # Get user's active_tenant_id for validation
+    active_tenant_id = payload.get("active_tenant_id")
+    
+    body = await request.json()
+    docs = body.get("docs", [])
+    
+    return await virtual_table_handler.bulk_docs_tenants(
+        requesting_user_id,
+        active_tenant_id or "",
+        docs
+    )
+
+logger.info("✓ Registered virtual table routes (__users, __tenants, _changes, _bulk_docs)")
 
 # Add Tenant Management Routes (BEFORE catch-all to ensure /api/* routes match first)
 tenant_router = create_tenant_router(couch_sitter_service, invite_service)

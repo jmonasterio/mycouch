@@ -274,6 +274,7 @@ class MemoryBackend(BaseBackend):
                         self._docs[doc_id] = doc
                         self._add_change(doc_id, doc)
                         logger.info(f"MemoryBackend PUT: stored doc {doc_id}, total docs: {len(self._docs)}")
+                        # Return CouchDB-style response
                         return {"ok": True, "id": doc_id, "_rev": doc["_rev"]}
 
                     elif method == "DELETE":
@@ -319,7 +320,7 @@ class MemoryBackend(BaseBackend):
             doc_value = doc[key]
 
             if isinstance(condition, dict):
-                # Handle Mango operators like $eq, $gt, etc.
+                # Handle Mango operators like $eq, $gt, $elemMatch, etc.
                 for op, value in condition.items():
                     if op == "$eq" and doc_value != value:
                         return False
@@ -335,6 +336,43 @@ class MemoryBackend(BaseBackend):
                         return False
                     elif op == "$in" and doc_value not in value:
                         return False
+                    elif op == "$elemMatch":
+                        # $elemMatch: at least one element in array must match sub-selector
+                        if not isinstance(doc_value, list):
+                            logger.debug(f"$elemMatch: {key} is not a list, got {type(doc_value)}")
+                            return False
+                        match_found = False
+                        for elem in doc_value:
+                            # Create a pseudo-doc with the element as a document
+                            if isinstance(value, dict):
+                                # value contains operators like {$eq: "user1"}
+                                elem_matches = True
+                                for elem_op, elem_value in value.items():
+                                    if elem_op == "$eq" and elem != elem_value:
+                                        elem_matches = False
+                                        logger.debug(f"$elemMatch $eq: {elem} != {elem_value}")
+                                    elif elem_op == "$in" and elem not in elem_value:
+                                        elem_matches = False
+                                    # Add more operators as needed
+                                if elem_matches:
+                                    match_found = True
+                                    logger.debug(f"$elemMatch: found match for {elem}")
+                                    break
+                            else:
+                                # Simple value match
+                                if elem == value:
+                                    match_found = True
+                                    break
+                        logger.debug(f"$elemMatch {key}: match_found={match_found}, value={value}, doc_value={doc_value}")
+                        if not match_found:
+                            return False
+                    elif op == "$exists":
+                        # Check if field exists
+                        exists = key in doc
+                        if value and not exists:
+                            return False
+                        if not value and exists:
+                            return False
             elif doc_value != condition:
                 return False
 
@@ -429,6 +467,104 @@ class CouchDAL:
             Response data from the backend
         """
         return await self.backend.handle_request(path, method, payload, params)
+
+    async def get_document(self, db: str, doc_id: str) -> Dict[str, Any]:
+        """
+        Get a document by ID.
+        
+        Args:
+            db: Database name
+            doc_id: Document ID
+            
+        Returns:
+            Document dictionary
+            
+        Raises:
+            HTTPException: If document not found
+        """
+        from fastapi import HTTPException
+        
+        response = await self.get(f"/{db}/{doc_id}", "GET")
+        
+        if "error" in response:
+            if response.get("error") == "not_found":
+                raise HTTPException(status_code=404, detail="Document not found")
+            raise HTTPException(status_code=400, detail=response.get("reason", "Unknown error"))
+        
+        return response
+
+    async def put_document(self, db: str, doc_id: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create or update a document.
+        
+        Args:
+            db: Database name
+            doc_id: Document ID
+            doc: Document to store
+            
+        Returns:
+            Response with _id and _rev
+            
+        Raises:
+            HTTPException: If operation fails
+        """
+        from fastapi import HTTPException
+        
+        response = await self.get(f"/{db}/{doc_id}", "PUT", payload=doc)
+        
+        if "error" in response:
+            if response.get("error") == "conflict":
+                raise HTTPException(status_code=409, detail="Revision conflict")
+            raise HTTPException(status_code=400, detail=response.get("reason", "Unknown error"))
+        
+        return response
+
+    async def delete_document(self, db: str, doc_id: str, rev: str) -> Dict[str, Any]:
+        """
+        Delete a document.
+        
+        Args:
+            db: Database name
+            doc_id: Document ID
+            rev: Document revision (_rev)
+            
+        Returns:
+            Response with _id and _rev
+            
+        Raises:
+            HTTPException: If operation fails
+        """
+        from fastapi import HTTPException
+        
+        response = await self.get(f"/{db}/{doc_id}", "DELETE", params={"rev": rev})
+        
+        if "error" in response:
+            raise HTTPException(status_code=400, detail=response.get("reason", "Unknown error"))
+        
+        return response
+
+    async def query_documents(self, db: str, query: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Query documents using _find.
+        
+        Args:
+            db: Database name
+            query: Mango query object
+            
+        Returns:
+            Response with docs array
+            
+        Raises:
+            HTTPException: If query fails
+        """
+        from fastapi import HTTPException
+        
+        response = await self.get(f"/{db}/_find", "POST", payload=query)
+        
+        if "error" in response:
+            raise HTTPException(status_code=400, detail=response.get("reason", "Query error"))
+        
+        return response
 
     async def close(self):
         """Close backend resources if needed."""
