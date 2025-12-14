@@ -600,27 +600,50 @@ class VirtualTableHandler:
         """
         GET /__users/_changes
         Return change feed filtered to requesting user's own doc.
+        Virtual table handler: queries couch-sitter internally, no database permission needed.
         """
-        query_params = {"since": since, "include_docs": include_docs}
-        if limit:
-            query_params["limit"] = limit
-        
-        # Build query for CouchDB
         try:
-            # Query using DAL (will format query params)
-            result = await self.dal.query_documents("couch-sitter", {
-                "selector": {"type": "user", "_id": f"user_{requesting_user_id}"}
-            })
+            # Fetch the user's own document from couch-sitter
+            internal_id = VirtualTableMapper.user_virtual_to_internal(requesting_user_id)
+            doc = await self.dal.get_document("couch-sitter", internal_id)
+            
+            # Filter out soft-deleted docs
+            if doc.get("deleted"):
+                return {
+                    "results": [],
+                    "last_seq": since or "0",
+                    "pending": 0
+                }
+            
+            # Convert to _changes format
+            # Simple seq based on presence: if since=0 or no since, include the doc
+            results = []
+            if since == "0" or not since:
+                results.append({
+                    "seq": "1-abc",
+                    "id": doc.get("_id"),
+                    "changes": [{"rev": doc.get("_rev")}],
+                    "doc": doc if include_docs else None
+                })
+            
+            return {
+                "results": results,
+                "last_seq": "1-abc" if results else since or "0",
+                "pending": 0
+            }
+            
+        except HTTPException as e:
+            if e.status_code == 404:
+                # User doc doesn't exist yet - return empty changes
+                return {
+                    "results": [],
+                    "last_seq": since or "0",
+                    "pending": 0
+                }
+            raise
         except Exception as e:
             logger.error(f"Error querying user changes: {e}")
             raise HTTPException(status_code=500, detail="Error querying changes")
-        
-        # For now, return empty changes (proper _changes support requires CouchDB _changes endpoint)
-        return {
-            "results": [],
-            "last_seq": "now",
-            "pending": 0
-        }
 
     async def get_tenant_changes(
         self,
@@ -632,9 +655,10 @@ class VirtualTableHandler:
         """
         GET /__tenants/_changes
         Return change feed filtered to tenants user is member of.
+        Virtual table handler: queries couch-sitter internally, no database permission needed.
         """
-        # Query tenants user is member of
         try:
+            # Query couch-sitter for tenants this user is member of
             result = await self.dal.query_documents("couch-sitter", {
                 "selector": {
                     "type": "tenant",
@@ -649,17 +673,24 @@ class VirtualTableHandler:
         # Convert to _changes format
         docs = result.get("docs", [])
         results = []
+        
+        # Simple seq-based filtering: include all docs if since=0, otherwise check seq
+        since_num = int(since) if since and since != "0" else 0
+        
         for i, doc in enumerate(docs):
-            results.append({
-                "seq": f"{i+1}-abc",
-                "id": doc.get("_id"),
-                "changes": [{"rev": doc.get("_rev")}],
-                "doc": doc if include_docs else None
-            })
+            seq_num = i + 1
+            # Include doc if seq > since
+            if seq_num > since_num:
+                results.append({
+                    "seq": f"{seq_num}-abc",
+                    "id": doc.get("_id"),
+                    "changes": [{"rev": doc.get("_rev")}],
+                    "doc": doc if include_docs else None
+                })
         
         return {
             "results": results,
-            "last_seq": f"{len(docs)}-abc" if docs else "0-abc",
+            "last_seq": f"{len(docs)}-abc" if docs else since or "0-abc",
             "pending": 0
         }
 

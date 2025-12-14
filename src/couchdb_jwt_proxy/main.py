@@ -260,16 +260,23 @@ def verify_clerk_jwt(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str
         # 1. Extract issuer from unverified token
         unverified_payload = decode_token_unsafe(token)
         if not unverified_payload:
+             logger.error(f"JWT verification failed: invalid_token_format")
              return None, "invalid_token_format"
              
         issuer = unverified_payload.get("iss")
         if not issuer:
+            logger.error(f"JWT verification failed: missing_issuer_claim")
             return None, "missing_issuer_claim"
             
         # 2. Validate issuer is registered
         # Note: APPLICATIONS keys are issuers
+        logger.debug(f"JWT issuer: {issuer}")
+        logger.debug(f"Registered applications: {list(APPLICATIONS.keys())}")
+        
         if issuer not in APPLICATIONS:
-             logger.warning(f"Unknown issuer: {issuer}")
+             logger.warning(f"JWT verification FAILED - Unknown issuer: {issuer}")
+             logger.warning(f"  Registered issuers: {list(APPLICATIONS.keys())}")
+             logger.warning(f"  Sub in token: {unverified_payload.get('sub')}")
              return None, "unknown_issuer"
 
         # 3. Get JWKS client for this issuer
@@ -897,20 +904,25 @@ async def initialize_applications():
     """Initialize applications from database - fail if database is not accessible"""
     global APPLICATIONS
 
-    logger.info("Initializing applications from database...")
+    logger.info("🚀 Initializing applications from database...")
 
     try:
         # Load all applications from database
         APPLICATIONS = await couch_sitter_service.load_all_apps()
-        logger.info(f"initialize_applications: Loaded apps: {APPLICATIONS}")
+        logger.info(f"✅ Loaded {len(APPLICATIONS) if APPLICATIONS else 0} applications from database")
 
         if not APPLICATIONS:
-            logger.error("No applications found in database")
+            logger.error("❌ No applications found in database!")
+            logger.error("   You need to create an application document in the couch-sitter database")
+            logger.error("   Format: {_id: 'app_<issuer>', type: 'application', issuer: '...', databaseNames: ['roady', 'couch-sitter'], clerkSecretKey: 'sk_...'}")
             raise RuntimeError("No applications configured in database. Please add application documents to the couch-sitter database.")
 
-        logger.info(f"✓ Loaded {len(APPLICATIONS)} applications from database")
+        logger.info(f"📋 Registered application issuers:")
         for issuer, app_config in APPLICATIONS.items():
-            logger.info(f"  {issuer} -> {app_config}")
+            logger.info(f"   - {issuer}")
+            logger.info(f"     Databases: {app_config.get('databaseNames', [])}")
+            has_secret = "✓" if app_config.get('clerkSecretKey') else "✗"
+            logger.info(f"     Secret key: {has_secret}")
 
     except Exception as e:
         logger.error(f"Failed to initialize applications from database: {e}")
@@ -1506,16 +1518,25 @@ async def user_changes(
     authorization: Optional[str] = Header(None)
 ):
     """GET /__users/_changes - Get user document changes"""
+    logger.info(f"🎯 EXPLICITLY HANDLING: GET /__users/_changes")
+    logger.info(f"   Authorization header present: {bool(authorization)}")
+    
     if not authorization or not authorization.startswith("Bearer "):
+        logger.error(f"❌ GET /__users/_changes - Missing or invalid auth header: {authorization[:50] if authorization else 'None'}")
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
+    logger.info(f"   Token length: {len(token)}")
     payload, error_reason = verify_clerk_jwt(token)
+    
     if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+        logger.error(f"❌ GET /__users/_changes - JWT verification failed: {error_reason}")
+        logger.error(f"   Will raise 403 Forbidden")
+        raise HTTPException(status_code=403, detail=f"Invalid token ({error_reason})")
     
     requesting_user_id = payload.get("sub")
     if not requesting_user_id:
+        logger.error(f"❌ GET /__users/_changes - Missing 'sub' in JWT")
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
     # Extract query params
@@ -1523,12 +1544,16 @@ async def user_changes(
     limit = request.query_params.get("limit")
     include_docs = request.query_params.get("include_docs", "false").lower() == "true"
     
-    return await virtual_table_handler.get_user_changes(
+    logger.info(f"✅ GET /__users/_changes - User: {requesting_user_id[:20]}..., Since: {since}, Include docs: {include_docs}")
+    
+    result = await virtual_table_handler.get_user_changes(
         requesting_user_id,
         since=since,
         limit=int(limit) if limit else None,
         include_docs=include_docs
     )
+    logger.info(f"✅ GET /__users/_changes - Returning {len(result.get('results', []))} changes")
+    return result
 
 @app.post("/__users/_bulk_docs")
 async def user_bulk_docs(request: Request, authorization: Optional[str] = Header(None)):
@@ -1556,16 +1581,25 @@ async def tenant_changes(
     authorization: Optional[str] = Header(None)
 ):
     """GET /__tenants/_changes - Get tenant document changes"""
+    logger.info(f"🎯 EXPLICITLY HANDLING: GET /__tenants/_changes")
+    logger.info(f"   Authorization header present: {bool(authorization)}")
+    
     if not authorization or not authorization.startswith("Bearer "):
+        logger.error(f"❌ GET /__tenants/_changes - Missing or invalid auth header: {authorization[:50] if authorization else 'None'}")
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
+    logger.info(f"   Token length: {len(token)}")
     payload, error_reason = verify_clerk_jwt(token)
+    
     if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+        logger.error(f"❌ GET /__tenants/_changes - JWT verification failed: {error_reason}")
+        logger.error(f"   Will raise 403 Forbidden")
+        raise HTTPException(status_code=403, detail=f"Invalid token ({error_reason})")
     
     requesting_user_id = payload.get("sub")
     if not requesting_user_id:
+        logger.error(f"❌ GET /__tenants/_changes - Missing 'sub' in JWT")
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
     # Extract query params
@@ -1573,12 +1607,16 @@ async def tenant_changes(
     limit = request.query_params.get("limit")
     include_docs = request.query_params.get("include_docs", "false").lower() == "true"
     
-    return await virtual_table_handler.get_tenant_changes(
+    logger.info(f"✅ GET /__tenants/_changes - User: {requesting_user_id[:20]}..., Since: {since}, Include docs: {include_docs}")
+    
+    result = await virtual_table_handler.get_tenant_changes(
         requesting_user_id,
         since=since,
         limit=int(limit) if limit else None,
         include_docs=include_docs
     )
+    logger.info(f"✅ GET /__tenants/_changes - Returning {len(result.get('results', []))} changes")
+    return result
 
 @app.post("/__tenants/_bulk_docs")
 async def tenant_bulk_docs(request: Request, authorization: Optional[str] = Header(None)):
@@ -1623,6 +1661,14 @@ async def proxy_couchdb(
     """Proxy requests to CouchDB with JWT validation and tenant enforcement"""
 
     logger.debug(f"Incoming request: {request.method} /{path}")
+
+    # NOTE: Virtual table routes (/__users/*, /__tenants/*, etc.) are handled by explicit @app.get() routes above.
+    # If they reach here, something went wrong with route matching.
+    # This catch-all should NOT handle these paths.
+    if path.startswith("__users") or path.startswith("__tenants"):
+        logger.error(f"❌ Virtual table path reached catch-all: {request.method} /{path}")
+        logger.error(f"   This means explicit virtual routes are not being registered properly")
+        raise HTTPException(status_code=500, detail="Virtual table route not registered")
 
     # Handle CORS preflight requests explicitly if middleware didn't catch them
     if request.method == "OPTIONS":
