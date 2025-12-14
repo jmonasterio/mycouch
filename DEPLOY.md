@@ -42,7 +42,30 @@ In your GitHub repo → Settings → Secrets and variables → Actions → New r
    - Paste the entire output
    - Same as used for roady deployment
 
-### Step 3: Automatic Deployment
+### Step 3: Set Up systemd Service (One-time setup)
+
+On the server, copy the service file and enable it:
+
+```bash
+ssh jm@argw.com "sudo cp /var/www/argw.com/mycouch/config/mycouch.service /etc/systemd/system/"
+ssh jm@argw.com "sudo systemctl daemon-reload"
+ssh jm@argw.com "sudo systemctl enable mycouch"
+ssh jm@argw.com "sudo systemctl start mycouch"
+```
+
+Verify it's running:
+
+```bash
+ssh jm@argw.com "sudo systemctl status mycouch"
+```
+
+View logs:
+
+```bash
+ssh jm@argw.com "sudo journalctl -u mycouch -f"
+```
+
+### Step 4: Automatic Deployment
 
 The GitHub Actions workflow in `.github/workflows/deploy.yml` will:
 
