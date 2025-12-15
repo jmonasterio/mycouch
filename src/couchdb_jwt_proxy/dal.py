@@ -314,6 +314,19 @@ class MemoryBackend(BaseBackend):
                 continue
 
             # Handle field matching
+            # Special case: $exists operator needs to check field presence
+            if isinstance(condition, dict) and "$exists" in condition:
+                exists = key in doc
+                exists_value = condition["$exists"]
+                if exists_value and not exists:
+                    return False
+                if not exists_value and exists:
+                    return False
+                # If $exists is the only condition, continue to next key
+                if len(condition) == 1:
+                    continue
+            
+            # For non-$exists conditions, key must exist in doc
             if key not in doc:
                 return False
 
@@ -367,12 +380,8 @@ class MemoryBackend(BaseBackend):
                         if not match_found:
                             return False
                     elif op == "$exists":
-                        # Check if field exists
-                        exists = key in doc
-                        if value and not exists:
-                            return False
-                        if not value and exists:
-                            return False
+                        # Already handled above, skip
+                        pass
             elif doc_value != condition:
                 return False
 

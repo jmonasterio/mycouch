@@ -488,7 +488,6 @@ class TestVirtualTableHandlerTenantCRUD:
         assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="Memory DAL $elemMatch operator needs refinement")
     async def test_list_tenants_filtered_to_member(self, virtual_table_handler, dal):
         """List tenants returns only user's tenants"""
         # Create multiple tenants
@@ -521,7 +520,8 @@ class TestVirtualTableHandlerTenantCRUD:
         # List tenants for user_member
         results = await virtual_table_handler.list_tenants("user_member")
         assert len(results) == 1
-        assert results[0]["_id"] == "tenant_team1"
+        # Virtual table handler converts internal IDs to virtual format (removes prefix)
+        assert results[0]["_id"] == "team1"
 
     @pytest.mark.asyncio
     async def test_update_tenant_owner_only(self, virtual_table_handler, dal):
@@ -663,7 +663,6 @@ class TestVirtualTableChanges:
         assert "last_seq" in result
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="Memory DAL $elemMatch operator needs refinement")
     async def test_tenant_changes_filters_membership(self, virtual_table_handler, dal):
         """GET /__tenants/_changes returns only member tenants"""
         # Create tenants
