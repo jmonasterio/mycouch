@@ -867,12 +867,15 @@ async def startup_event():
         logger.info("[Startup] Auth log service not configured")
 
 # Add CORS middleware (before tenant router registration to ensure proper middleware ordering)
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:4000").split(",")
+cors_origins = [origin.strip() for origin in cors_origins]  # Clean up whitespace
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins - restrict in production if needed
+    allow_origins=cors_origins,  # Specific origins instead of wildcard (required when allow_credentials=True)
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "COPY", "PATCH", "OPTIONS"],
+    allow_headers=["accept", "authorization", "content-type", "origin", "x-csrf-token"],
 )
 
 # Add rate limit error handler
