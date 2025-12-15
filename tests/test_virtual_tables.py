@@ -7,6 +7,7 @@ Uses memory DAL for fast, isolated testing without touching real database.
 
 import pytest
 import json
+import hashlib
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from httpx import AsyncClient, ASGITransport
@@ -21,6 +22,11 @@ from couchdb_jwt_proxy.virtual_tables import (
 )
 from couchdb_jwt_proxy.bootstrap import BootstrapManager
 from couchdb_jwt_proxy.dal import create_dal
+
+
+def _hash_sub(sub: str) -> str:
+    """Helper to hash user sub for tests"""
+    return hashlib.sha256(sub.encode('utf-8')).hexdigest()
 
 
 # ============================================================================
@@ -135,35 +141,42 @@ class TestVirtualTableAccessControl:
 
     def test_user_can_read_own_doc(self):
         """User can read their own document"""
-        assert VirtualTableAccessControl.can_read_user("user1", "user1") is True
+        user1_hash = _hash_sub("user1")
+        assert VirtualTableAccessControl.can_read_user("user1", user1_hash) is True
 
     def test_user_cannot_read_other_doc(self):
         """User cannot read another user's document"""
-        assert VirtualTableAccessControl.can_read_user("user1", "user2") is False
+        user2_hash = _hash_sub("user2")
+        assert VirtualTableAccessControl.can_read_user("user1", user2_hash) is False
 
     def test_user_can_update_allowed_field(self):
         """User can update allowed fields in their own doc"""
-        assert VirtualTableAccessControl.can_update_user("user1", "user1", "name") is True
-        assert VirtualTableAccessControl.can_update_user("user1", "user1", "email") is True
-        assert VirtualTableAccessControl.can_update_user("user1", "user1", "active_tenant_id") is True
+        user1_hash = _hash_sub("user1")
+        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "name") is True
+        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "email") is True
+        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "active_tenant_id") is True
 
     def test_user_cannot_update_immutable_field(self):
         """User cannot update immutable fields"""
-        assert VirtualTableAccessControl.can_update_user("user1", "user1", "sub") is False
-        assert VirtualTableAccessControl.can_update_user("user1", "user1", "type") is False
-        assert VirtualTableAccessControl.can_update_user("user1", "user1", "_id") is False
+        user1_hash = _hash_sub("user1")
+        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "sub") is False
+        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "type") is False
+        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "_id") is False
 
     def test_user_cannot_update_other_user(self):
         """User cannot update another user's document"""
-        assert VirtualTableAccessControl.can_update_user("user1", "user2", "name") is False
+        user2_hash = _hash_sub("user2")
+        assert VirtualTableAccessControl.can_update_user("user1", user2_hash, "name") is False
 
     def test_user_cannot_delete_self(self):
         """User cannot delete themselves"""
-        assert VirtualTableAccessControl.can_delete_user("user1", "user1") is False
+        user1_hash = _hash_sub("user1")
+        assert VirtualTableAccessControl.can_delete_user("user1", user1_hash) is False
 
     def test_user_can_delete_other(self):
         """Admin can delete another user (delete doesn't check ownership)"""
-        assert VirtualTableAccessControl.can_delete_user("admin", "user1") is True
+        user1_hash = _hash_sub("user1")
+        assert VirtualTableAccessControl.can_delete_user("admin", user1_hash) is True
 
     def test_user_can_read_tenant_if_member(self):
         """User can read tenant if in userIds"""
@@ -303,20 +316,21 @@ class TestVirtualTableHandlerUserCRUD:
     @pytest.mark.asyncio
     async def test_get_user_own_doc(self, virtual_table_handler, dal):
         """User can read their own document"""
-        # Create a user doc
-        user_id = "user_abc123"
+        # Create a user doc with proper internal ID (user_<hash>)
+        user_hash = _hash_sub("abc123")
+        internal_id = f"user_{user_hash}"
         user_doc = {
-            "_id": user_id,
+            "_id": internal_id,
             "type": "user",
             "sub": "abc123",
             "email": "user@example.com",
             "name": "Test User"
         }
-        await dal.put_document("couch-sitter", user_id, user_doc)
+        await dal.put_document("couch-sitter", internal_id, user_doc)
 
-        # Get own doc
-        result = await virtual_table_handler.get_user("abc123", "abc123")
-        assert result["_id"] == user_id
+        # Get own doc - use hashed ID for URL param
+        result = await virtual_table_handler.get_user(user_hash, "abc123")
+        assert result["_id"] == internal_id
         assert result["email"] == "user@example.com"
 
     @pytest.mark.asyncio
@@ -324,37 +338,40 @@ class TestVirtualTableHandlerUserCRUD:
         """User cannot read another user's document"""
         from fastapi import HTTPException
 
+        other_hash = _hash_sub("other")
+        internal_id = f"user_{other_hash}"
         user_doc = {
-            "_id": "user_other",
+            "_id": internal_id,
             "type": "user",
             "sub": "other",
             "email": "other@example.com"
         }
-        await dal.put_document("couch-sitter", "user_other", user_doc)
+        await dal.put_document("couch-sitter", internal_id, user_doc)
 
         with pytest.raises(HTTPException) as exc_info:
-            await virtual_table_handler.get_user("other", "abc123")
+            await virtual_table_handler.get_user(other_hash, "abc123")
         assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
     async def test_update_user_allowed_fields(self, virtual_table_handler, dal):
         """User can update allowed fields"""
-        user_id = "user_abc123"
+        user_hash = _hash_sub("abc123")
+        internal_id = f"user_{user_hash}"
         user_doc = {
-            "_id": user_id,
+            "_id": internal_id,
             "type": "user",
             "sub": "abc123",
             "email": "old@example.com",
             "name": "Old Name"
         }
-        await dal.put_document("couch-sitter", user_id, user_doc)
+        await dal.put_document("couch-sitter", internal_id, user_doc)
 
-        # Update allowed fields
+        # Update allowed fields - use hashed ID for URL param
         updates = {
             "name": "New Name",
             "email": "new@example.com"
         }
-        result = await virtual_table_handler.update_user("abc123", "abc123", updates)
+        result = await virtual_table_handler.update_user(user_hash, "abc123", updates)
         assert result["name"] == "New Name"
         assert result["email"] == "new@example.com"
 
@@ -363,39 +380,41 @@ class TestVirtualTableHandlerUserCRUD:
         """User cannot update immutable fields"""
         from fastapi import HTTPException
 
-        user_id = "user_abc123"
+        user_hash = _hash_sub("abc123")
+        internal_id = f"user_{user_hash}"
         user_doc = {
-            "_id": user_id,
+            "_id": internal_id,
             "type": "user",
             "sub": "abc123",
             "email": "user@example.com"
         }
-        await dal.put_document("couch-sitter", user_id, user_doc)
+        await dal.put_document("couch-sitter", internal_id, user_doc)
 
         # Try to update immutable field
         updates = {"sub": "xyz"}
         with pytest.raises(HTTPException) as exc_info:
-            await virtual_table_handler.update_user("abc123", "abc123", updates)
+            await virtual_table_handler.update_user(user_hash, "abc123", updates)
         assert exc_info.value.status_code == 400
 
     @pytest.mark.asyncio
     async def test_delete_user_soft_delete(self, virtual_table_handler, dal):
         """Soft-delete user marks as deleted"""
-        user_id = "user_other"
+        other_hash = _hash_sub("other")
+        internal_id = f"user_{other_hash}"
         user_doc = {
-            "_id": user_id,
+            "_id": internal_id,
             "type": "user",
             "sub": "other",
             "email": "other@example.com"
         }
-        await dal.put_document("couch-sitter", user_id, user_doc)
+        await dal.put_document("couch-sitter", internal_id, user_doc)
 
-        # Delete other user (not self-delete prevention test)
-        result = await virtual_table_handler.delete_user("other", "admin")
+        # Delete other user (not self-delete prevention test) - use hashed ID
+        result = await virtual_table_handler.delete_user(other_hash, "admin")
         assert result["ok"] is True
 
         # Verify soft-deleted
-        fetched = await dal.get_document("couch-sitter", user_id)
+        fetched = await dal.get_document("couch-sitter", internal_id)
         assert fetched.get("deleted") is True
 
     @pytest.mark.asyncio
@@ -403,18 +422,19 @@ class TestVirtualTableHandlerUserCRUD:
         """User cannot delete themselves"""
         from fastapi import HTTPException
 
-        user_id = "user_abc123"
+        user_hash = _hash_sub("abc123")
+        internal_id = f"user_{user_hash}"
         user_doc = {
-            "_id": user_id,
+            "_id": internal_id,
             "type": "user",
             "sub": "abc123",
             "email": "user@example.com"
         }
-        await dal.put_document("couch-sitter", user_id, user_doc)
+        await dal.put_document("couch-sitter", internal_id, user_doc)
 
-        # Try to self-delete
+        # Try to self-delete - use hashed ID
         with pytest.raises(HTTPException) as exc_info:
-            await virtual_table_handler.delete_user("abc123", "abc123")
+            await virtual_table_handler.delete_user(user_hash, "abc123")
         assert exc_info.value.status_code == 403
 
 
@@ -679,20 +699,22 @@ class TestVirtualTableBulkDocs:
     @pytest.mark.asyncio
     async def test_bulk_docs_users_updates(self, virtual_table_handler, dal):
         """POST /__users/_bulk_docs processes multiple user updates"""
-        # Create user
+        # Create user with hashed ID
+        user_hash = _hash_sub("abc123")
+        internal_id = f"user_{user_hash}"
         user_doc = {
-            "_id": "user_abc123",
+            "_id": internal_id,
             "type": "user",
             "sub": "abc123",
             "name": "Original",
             "email": "old@example.com"
         }
-        await dal.put_document("couch-sitter", "user_abc123", user_doc)
+        await dal.put_document("couch-sitter", internal_id, user_doc)
 
-        # Bulk update
+        # Bulk update - use internal ID format, requesting user is the sub
         docs = [
             {
-                "_id": "user_abc123",
+                "_id": internal_id,
                 "name": "Updated"
             }
         ]

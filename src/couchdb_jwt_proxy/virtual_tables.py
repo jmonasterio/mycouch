@@ -91,6 +91,7 @@ class VirtualTableAccessControl:
         # user_id is Clerk sub (e.g., user_34tzJwWB3jaQT6ZKPqZIQoJwsmz)
         # target_user_id is hashed ID from URL (e.g., a3f7c2d...)
         user_hash = VirtualTableAccessControl._hash_user_id(user_id)
+        # Return False if trying to delete self, True otherwise
         return user_hash != target_user_id
 
     @staticmethod
