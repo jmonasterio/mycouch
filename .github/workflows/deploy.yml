@@ -27,6 +27,9 @@ jobs:
       - name: Install dependencies (including dev)
         run: uv sync --all-extras
 
+      - name: Create .env for tests
+        run: cp .env.example .env
+
       - name: Run tests
         run: uv run pytest tests -v
 
