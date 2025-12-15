@@ -30,6 +30,7 @@ from .invite_service import InviteService
 from .tenant_routes import create_tenant_router
 from .virtual_tables import VirtualTableHandler, VirtualTableMapper
 from .bootstrap import BootstrapManager
+from .index_bootstrap import IndexBootstrap
 from . import auth_middleware
 
 # Load environment variables
@@ -851,8 +852,21 @@ app.state.limiter = limiter
 # Startup event to ensure log database exists
 @app.on_event("startup")
 async def startup_event():
-    """Ensure auth log database exists on startup"""
+    """Ensure auth log database exists and indexes are created on startup"""
     logger.info("[Startup] Starting up...")
+    
+    # Bootstrap indexes on all databases
+    try:
+        index_bootstrap = IndexBootstrap(
+            couchdb_url=COUCHDB_INTERNAL_URL,
+            username=COUCHDB_USER,
+            password=COUCHDB_PASSWORD
+        )
+        await index_bootstrap.bootstrap_all()
+    except Exception as e:
+        logger.error(f"[Startup] Error bootstrapping indexes: {e}", exc_info=True)
+    
+    # Ensure auth log database exists
     if auth_log_service:
         logger.info(f"[Startup] Ensuring auth log database exists at: {COUCH_SITTER_LOG_DB_URL}")
         try:
