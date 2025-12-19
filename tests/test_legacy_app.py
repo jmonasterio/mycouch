@@ -72,7 +72,8 @@ class TestLegacyAppSupport:
             # Mock JWT
             mock_verify.return_value = ({
                 "sub": "user_123",
-                "iss": legacy_issuer
+                "iss": legacy_issuer,
+                "active_tenant_id": "tenant_123"  # Required for multi-tenant apps
             }, None)
 
             # Mock tenant extraction

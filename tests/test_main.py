@@ -196,44 +196,44 @@ class TestTenantEnforcement:
         """Test injecting tenant into document"""
         from couchdb_jwt_proxy.main import inject_tenant_into_doc, TENANT_FIELD
 
-        # Test for roady app (should inject)
+        # Test for multi-tenant app (should inject)
         doc1 = {"_id": "doc1", "name": "Test"}
-        result1 = inject_tenant_into_doc(doc1, "tenant-a", is_roady_app=True)
+        result1 = inject_tenant_into_doc(doc1, "tenant-a", is_multi_tenant_app=True)
         assert result1[TENANT_FIELD] == "tenant-a"
         assert result1["name"] == "Test"
 
         # Test for couch-sitter (should not inject)
         doc2 = {"_id": "doc2", "name": "Test"}
-        result2 = inject_tenant_into_doc(doc2, "tenant-a", is_roady_app=False)
+        result2 = inject_tenant_into_doc(doc2, "tenant-a", is_multi_tenant_app=False)
         assert TENANT_FIELD not in result2
 
     def test_rewrite_find_query(self):
         """Test rewriting _find query with tenant filter"""
         from couchdb_jwt_proxy.main import rewrite_find_query, TENANT_FIELD
 
-        # Test for roady app (should modify)
+        # Test for multi-tenant app (should modify)
         query1 = {"selector": {"type": "task"}}
-        result1 = rewrite_find_query(query1, "tenant-a", is_roady_app=True)
+        result1 = rewrite_find_query(query1, "tenant-a", is_multi_tenant_app=True)
         assert result1["selector"][TENANT_FIELD] == "tenant-a"
         assert result1["selector"]["type"] == "task"
 
         # Test for couch-sitter (should not modify)
         query2 = {"selector": {"type": "task"}}
-        result2 = rewrite_find_query(query2, "tenant-a", is_roady_app=False)
+        result2 = rewrite_find_query(query2, "tenant-a", is_multi_tenant_app=False)
         assert TENANT_FIELD not in result2["selector"]
 
     def test_rewrite_bulk_docs(self):
         """Test injecting tenant into bulk docs"""
         from couchdb_jwt_proxy.main import rewrite_bulk_docs, TENANT_FIELD
 
-        # Test for roady app (should modify)
+        # Test for multi-tenant app (should modify)
         body1 = {"docs": [{"name": "Doc1"}, {"name": "Doc2"}]}
-        result1 = rewrite_bulk_docs(body1, "tenant-a", is_roady_app=True)
+        result1 = rewrite_bulk_docs(body1, "tenant-a", is_multi_tenant_app=True)
         assert all(doc.get(TENANT_FIELD) == "tenant-a" for doc in result1["docs"])
 
         # Test for couch-sitter (should not modify)
         body2 = {"docs": [{"name": "Doc1"}, {"name": "Doc2"}]}
-        result2 = rewrite_bulk_docs(body2, "tenant-a", is_roady_app=False)
+        result2 = rewrite_bulk_docs(body2, "tenant-a", is_multi_tenant_app=False)
         assert all(TENANT_FIELD not in doc for doc in result2["docs"])
 
     def test_filter_response_documents(self):

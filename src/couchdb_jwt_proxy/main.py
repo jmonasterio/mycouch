@@ -55,7 +55,7 @@ APPLICATIONS: Dict[str, Dict[str, Any]] = {}
 #   "_id": "app_<issuer>",
 #   "type": "application",
 #   "issuer": "https://your-clerk-instance.clerk.accounts.dev",
-#   "databaseNames": ["roady", "couch-sitter"],
+#   "databaseNames": ["roady", "roady-staging", "couch-sitter"],
 #   "clerkSecretKey": "sk_...",
 #   "createdAt": "...",
 #   "updatedAt": "..."
@@ -350,17 +350,46 @@ def verify_clerk_jwt(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str
         logger.error(f"JWKS URL: {CLERK_JWKS_URL}")
         return None, f"clerk_token_error ({type(e).__name__})"
 
+def is_couch_sitter_app(payload: Dict[str, Any], request_path: str = None) -> bool:
+    """
+    Check if this request is for the couch-sitter application.
+    
+    Args:
+        payload: JWT payload dictionary
+        request_path: The request path (optional, for fallback path check)
+        
+    Returns:
+        True if couch-sitter app, False if multi-tenant app
+    """
+    issuer = payload.get("iss", "")
+    
+    # Check issuer against registered applications (primary check)
+    if issuer in APPLICATIONS:
+        app_config = APPLICATIONS[issuer]
+        dbs = []
+        if isinstance(app_config, dict):
+            dbs = app_config.get("databaseNames", [])
+        elif isinstance(app_config, list):
+            dbs = app_config
+        return "couch-sitter" in dbs
+    
+    # Fallback: check request path if issuer not registered
+    if request_path and ("couch-sitter" in request_path.lower() or "couch_sitter" in request_path.lower()):
+        return True
+    
+    return False
+
 async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> str:
     """
     Extract tenant ID from JWT payload using user/tenant management system.
 
-    This function supports both personal tenant (couch-sitter) and active tenant (roady) modes:
+    This function supports both personal tenant (couch-sitter) and multi-tenant app modes:
     - For couch-sitter: Always uses personal tenant
-    - For roady: Uses active tenant from Clerk metadata, falls back to personal tenant
+    - For multi-tenant apps: Uses active tenant from Clerk metadata
 
     Args:
         payload: JWT payload dictionary
-        request_path: The request path to determine application type (optional)
+        request_path: The request path (optional, for database name extraction)
 
     Returns:
         Tenant ID string
@@ -383,44 +412,11 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
         "session_id": payload.get("sid")  # Session ID if available
     }
 
-    # Determine application type from request path or issuer
-    is_roady_request = False
-    is_couch_sitter_request = False
-    
-    # 1. Check issuer against registered applications (most reliable)
-    issuer = payload.get("iss", "")
-    if issuer in APPLICATIONS:
-        app_config = APPLICATIONS[issuer]
-        dbs = []
-        if isinstance(app_config, dict):
-            dbs = app_config.get("databaseNames", [])
-        elif isinstance(app_config, list):
-            dbs = app_config
-            
-        if "roady" in dbs:
-            is_roady_request = True
-        elif "couch-sitter" in dbs:
-            is_couch_sitter_request = True
-            
-    # 2. Fallback to request path check
-    if not is_roady_request and not is_couch_sitter_request:
-        if request_path and "roady" in request_path.lower():
-            is_roady_request = True
-        elif request_path and ("couch-sitter" in request_path.lower() or "couch_sitter" in request_path.lower()):
-            is_couch_sitter_request = True
-            
-    # 3. Fallback to issuer string check
-    if not is_roady_request and not is_couch_sitter_request:
-        if "roady" in issuer.lower():
-            is_roady_request = True
-        elif "couch-sitter" in issuer.lower() or "couch_sitter" in issuer.lower():
-            is_couch_sitter_request = True
+    # Determine if this is a couch-sitter request (special case)
+    # Everything else is treated as a multi-tenant database
+    is_couch_sitter_request = is_couch_sitter_app(payload, request_path)
 
-    # Default to couch-sitter behavior if we can't determine
-    if not is_roady_request:
-        is_couch_sitter_request = True
-
-    logger.debug(f"Application type detected: {'roady' if is_roady_request else 'couch-sitter'}")
+    logger.debug(f"Application type detected: {'couch-sitter' if is_couch_sitter_request else 'multi-tenant (roady-like)'}")
 
     # Create sub hash for cache lookup
     sub_hash = hashlib.sha256(sub.encode('utf-8')).hexdigest()
@@ -462,8 +458,8 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
             logger.error(f"Failed to get tenant info for couch-sitter sub '{sub}': {e}")
             raise
 
-    # For roady, get active tenant from JWT
-    logger.debug(f"Roady request - checking for active tenant in JWT for sub '{sub}'")
+    # For multi-tenant apps (not couch-sitter), get active tenant from JWT
+    logger.debug(f"Multi-tenant request - checking for active tenant in JWT for sub '{sub}'")
 
     # Check for active_tenant_id claim in JWT
     active_tenant_id = payload.get("active_tenant_id") or payload.get("tenant_id")
@@ -478,7 +474,7 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
     
     # Missing active_tenant_id - REJECT the request (CWE-287 security fix)
     # No fallback to clerk API or bootstrap flow
-    logger.warning(f"SECURITY: Missing active_tenant_id in JWT for roady request from sub '{sub}' - rejecting request")
+    logger.warning(f"SECURITY: Missing active_tenant_id in JWT for multi-tenant request from sub '{sub}' - rejecting request")
     raise HTTPException(
         status_code=401,
         detail="Missing active_tenant_id claim in token. Please refresh your authentication token and try again."
@@ -583,50 +579,50 @@ def filter_document_for_tenant(doc: Dict[str, Any], tenant_id: str) -> Optional[
         return None
     return doc
 
-def inject_tenant_into_doc(doc: Dict[str, Any], tenant_id: str, is_roady_app: bool = False) -> Dict[str, Any]:
-    """
-    Inject tenant ID into document (conditional based on application type).
+def inject_tenant_into_doc(doc: Dict[str, Any], tenant_id: str, is_multi_tenant_app: bool = False) -> Dict[str, Any]:
+     """
+     Inject tenant ID into document (conditional based on application type).
 
-    For roady: Always inject tenant ID
-    For couch-sitter: Never inject tenant ID (simple behavior)
-    """
-    if is_roady_app:
-        doc[TENANT_FIELD] = tenant_id
-        logger.debug(f"Injected tenant ID into document for roady app: {tenant_id}")
-    else:
-        logger.debug(f"Skipping tenant injection for couch-sitter app")
-    return doc
+     For multi-tenant apps: Always inject tenant ID
+     For couch-sitter: Never inject tenant ID (simple behavior)
+     """
+     if is_multi_tenant_app:
+         doc[TENANT_FIELD] = tenant_id
+         logger.debug(f"Injected tenant ID into document for multi-tenant app: {tenant_id}")
+     else:
+         logger.debug(f"Skipping tenant injection for couch-sitter app")
+     return doc
 
-def rewrite_all_docs_query(query_params: str, tenant_id: str, is_roady_app: bool = False) -> str:
+def rewrite_all_docs_query(query_params: str, tenant_id: str, is_multi_tenant_app: bool = False) -> str:
     """
     Rewrite _all_docs query to filter by tenant (conditional based on application type).
 
-    For roady: Filter by tenant
+    For multi-tenant apps: Filter by tenant
     For couch-sitter: No tenant filtering
     """
-    if not is_roady_app:
+    if not is_multi_tenant_app:
         logger.debug(f"Skipping tenant filtering for couch-sitter _all_docs query")
         return query_params or ""
 
-    logger.debug(f"Adding tenant filtering for roady _all_docs query: {tenant_id}")
+    logger.debug(f"Adding tenant filtering for multi-tenant _all_docs query: {tenant_id}")
     # Add start/end keys for tenant filtering
     if query_params:
         return f"{query_params}&start_key=\"{tenant_id}:\"&end_key=\"{tenant_id}:\ufff0\""
     else:
         return f"start_key=\"{tenant_id}:\"&end_key=\"{tenant_id}:\ufff0\""
 
-def rewrite_find_query(body: Dict[str, Any], tenant_id: str, is_roady_app: bool = False) -> Dict[str, Any]:
+def rewrite_find_query(body: Dict[str, Any], tenant_id: str, is_multi_tenant_app: bool = False) -> Dict[str, Any]:
     """
     Rewrite _find query to inject tenant filter (conditional based on application type).
 
-    For roady: Filter by tenant
+    For multi-tenant apps: Filter by tenant
     For couch-sitter: No tenant filtering
     """
-    if not is_roady_app:
+    if not is_multi_tenant_app:
         logger.debug(f"Skipping tenant filtering for couch-sitter _find query")
         return body
 
-    logger.debug(f"Adding tenant filtering for roady _find query: {tenant_id}")
+    logger.debug(f"Adding tenant filtering for multi-tenant _find query: {tenant_id}")
     # Inject tenant into selector
     if "selector" not in body:
         body["selector"] = {}
@@ -635,51 +631,24 @@ def rewrite_find_query(body: Dict[str, Any], tenant_id: str, is_roady_app: bool 
     logger.debug(f"Rewrote _find query with tenant filter: {TENANT_FIELD}={tenant_id}")
     return body
 
-def rewrite_bulk_docs(body: Dict[str, Any], tenant_id: str, is_roady_app: bool = False) -> Dict[str, Any]:
+def rewrite_bulk_docs(body: Dict[str, Any], tenant_id: str, is_multi_tenant_app: bool = False) -> Dict[str, Any]:
     """
     Inject tenant into bulk docs (conditional based on application type).
 
-    For roady: Always inject tenant ID
+    For multi-tenant apps: Always inject tenant ID
     For couch-sitter: Never inject tenant ID
     """
     if "docs" in body:
         for doc in body["docs"]:
-            if is_roady_app:
+            if is_multi_tenant_app:
                 # Always inject tenant ID (override any existing value)
                 doc[TENANT_FIELD] = tenant_id
 
-        if is_roady_app:
-            logger.debug(f"Injected tenant into {len(body.get('docs', []))} documents for roady app")
+        if is_multi_tenant_app:
+            logger.debug(f"Injected tenant into {len(body.get('docs', []))} documents for multi-tenant app")
         else:
             logger.debug(f"Skipping tenant injection for {len(body.get('docs', []))} documents for couch-sitter app")
     return body
-
-def is_roady_application(request_path: str, payload: Dict[str, Any]) -> bool:
-    """
-    Determine if the request is for a roady application.
-
-    Args:
-        request_path: The request path
-        payload: JWT payload
-
-    Returns:
-        True if this is a roady request, False if couch-sitter
-    """
-    # Check request path first
-    if request_path and "roady" in request_path.lower():
-        return True
-    if request_path and ("couch-sitter" in request_path.lower() or "couch_sitter" in request_path.lower()):
-        return False
-
-    # Check the issuer from JWT
-    issuer = payload.get("iss", "")
-    if "roady" in issuer.lower():
-        return True
-    if "couch-sitter" in issuer.lower() or "couch_sitter" in issuer.lower():
-        return False
-
-    # Default to couch-sitter if we can't determine
-    return False
 
 def filter_response_documents(content: bytes, tenant_id: str) -> bytes:
     """Filter response to remove non-tenant documents (tenant mode always enabled)"""
@@ -1741,8 +1710,8 @@ async def proxy_couchdb(
     client_id = payload.get("sub")
     tenant_id = await extract_tenant(payload, path)
 
-    # Determine application type (roady vs couch-sitter)
-    is_roady_app = is_roady_application(path, payload)
+    # Determine application type
+    is_multi_tenant_app = not is_couch_sitter_app(payload, path)
 
     # Extract database name and endpoint path
     if path == "_all_dbs":
@@ -1808,9 +1777,6 @@ async def proxy_couchdb(
     if tenant_id:
         log_msg += f" | Tenant: {tenant_id}"
     log_msg += f" | {request.method} /{path}"
-
-    # Determine application type for conditional tenant enforcement (moved up for logging)
-    is_roady_app = is_roady_application(path, payload)
     
     # Log successful authentication event
     if auth_log_service:
@@ -1831,7 +1797,7 @@ async def proxy_couchdb(
     logger.debug(f"🔐 JWT VALIDATED - {request.method} /{path}")
     logger.debug(f"🎯 JWT Issuer: {payload.get('iss')}")
     logger.debug(f"🗄️ Target Database: {db_name}")
-    logger.debug(f"📱 Application detected: {'🚗 ROADY' if is_roady_app else '🛋️ COUCH-SITTER'}")
+    logger.debug(f"📱 Application detected: {'📊 Multi-tenant' if is_multi_tenant_app else '🛋️ Couch-sitter'}")
 
     # Safe logging: only log non-sensitive claim information
     if logger.level <= logging.DEBUG:
@@ -1859,7 +1825,7 @@ async def proxy_couchdb(
 
     # Rewrite query parameters for tenant enforcement (conditional)
     if path == "_all_docs":
-        query_string = rewrite_all_docs_query(query_string, tenant_id, is_roady_app)
+        query_string = rewrite_all_docs_query(query_string, tenant_id, is_multi_tenant_app)
     elif path == "_changes":
         # For _changes, we need to filter by tenant_id in the response
         # CouchDB _changes doesn't support tenant filtering in query params
@@ -1892,15 +1858,15 @@ async def proxy_couchdb(
     # Rewrite body for tenant enforcement (conditional based on application type)
     if body_dict:
         if path == "_find":
-            body_dict = rewrite_find_query(body_dict, tenant_id, is_roady_app)
+            body_dict = rewrite_find_query(body_dict, tenant_id, is_multi_tenant_app)
         elif path == "_bulk_docs":
-            body_dict = rewrite_bulk_docs(body_dict, tenant_id, is_roady_app)
+            body_dict = rewrite_bulk_docs(body_dict, tenant_id, is_multi_tenant_app)
         elif request.method in ["PUT"] and not path.startswith("_"):
-            # Single document creation/update - inject tenant ID for roady only
-            body_dict = inject_tenant_into_doc(body_dict, tenant_id, is_roady_app)
+            # Single document creation/update - inject tenant ID for multi-tenant apps only
+            body_dict = inject_tenant_into_doc(body_dict, tenant_id, is_multi_tenant_app)
         elif request.method == "POST" and not path.startswith("_") and "/" not in path:
-            # Document creation via POST to database - inject tenant ID for roady only
-            body_dict = inject_tenant_into_doc(body_dict, tenant_id, is_roady_app)
+            # Document creation via POST to database - inject tenant ID for multi-tenant apps only
+            body_dict = inject_tenant_into_doc(body_dict, tenant_id, is_multi_tenant_app)
 
         body = json.dumps(body_dict).encode()
 
@@ -1975,8 +1941,8 @@ async def proxy_couchdb(
         # Filter response for tenant enforcement (always enabled)
         response_content = dal_response
         
-        # Only filter if this is a roady app (couch-sitter admin app sees everything)
-        if is_roady_app:
+        # Only filter if this is a multi-tenant app (couch-sitter admin app sees everything)
+        if is_multi_tenant_app:
             # Use endpoint_path for checking which filter to apply
             # path contains "dbname/endpoint", endpoint_path contains "endpoint"
             if endpoint_path in ["_all_docs", "_find"] or path in ["_all_docs", "_find"]:
