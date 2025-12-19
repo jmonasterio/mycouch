@@ -200,13 +200,23 @@ class ClerkService:
                 "active_tenant_updated_at": json.dumps({"__type__": "datetime", "value": "now"})
             }
 
-            # Update user's public metadata (JWT template references {{user.public_metadata.active_tenant_id}})
-            client.users.update(
-                user_id=user_id,
-                public_metadata=updated_metadata
-            )
-            logger.info(f"Updated active tenant in user public metadata for user {user_id}: {tenant_id}")
-            return True
+            # Update session's public metadata
+            try:
+                client.sessions.update(
+                    session_id=session_id,
+                    public_metadata=updated_metadata
+                )
+                logger.info(f"Updated active tenant in session metadata for user {user_id}: {tenant_id}")
+                return True
+            except Exception as session_error:
+                # Fallback to updating user metadata if session update fails
+                logger.debug(f"Session metadata update failed, falling back to user metadata: {session_error}")
+                client.users.update(
+                    user_id=user_id,
+                    public_metadata=updated_metadata
+                )
+                logger.info(f"Updated active tenant in user public metadata for user {user_id}: {tenant_id}")
+                return True
 
         except Exception as e:
             logger.error(f"Failed to update active tenant for user {user_id}: {e}")
