@@ -293,7 +293,7 @@ tests/test_virtual_tables.py::TestExtractTenantBootstrapIntegration (3 tests) PA
 - [ ] Run `uv run pytest tests/test_virtual_tables.py -v` (should see 43 passed, 2 xfailed)
 - [ ] Start mycouch: `make dev-run` (or `uv run python -m uvicorn ...`)
 - [ ] Verify bootstrap endpoints: `GET /__users/_changes`, `GET /__tenants`
-- [ ] Configure Clerk JWT claim: `active_tenant_id: {{session.public_metadata.active_tenant_id}}`
+- [ ] Configure Clerk JWT claim: `active_tenant_id: {{user.public_metadata.active_tenant_id}}`
 - [ ] Test roady integration: Login → check tenant manager initialization
 - [ ] Test tenant switching: Change active tenant → verify JWT refresh
 - [ ] Test PouchDB sync: Create equipment → verify syncs to /roady database

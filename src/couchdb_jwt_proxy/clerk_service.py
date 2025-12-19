@@ -200,25 +200,13 @@ class ClerkService:
                 "active_tenant_updated_at": json.dumps({"__type__": "datetime", "value": "now"})
             }
 
-            # Try to update session metadata first
-            try:
-                # Update the session's public metadata (this is what appears in JWT)
-                client.sessions.update(
-                    session_id=session_id,
-                    public_metadata=updated_metadata
-                )
-                logger.info(f"Updated active tenant in session metadata for user {user_id}: {tenant_id}")
-                return True
-            except Exception as session_error:
-                logger.warning(f"Failed to update session metadata, falling back to user metadata: {session_error}")
-
-                # FALLBACK: Update user metadata if session metadata fails
-                client.users.update(
-                    user_id=user_id,
-                    public_metadata=updated_metadata
-                )
-                logger.info(f"Updated active tenant in user metadata (fallback) for user {user_id}: {tenant_id}")
-                return True
+            # Update user's public metadata (JWT template references {{user.public_metadata.active_tenant_id}})
+            client.users.update(
+                user_id=user_id,
+                public_metadata=updated_metadata
+            )
+            logger.info(f"Updated active tenant in user public metadata for user {user_id}: {tenant_id}")
+            return True
 
         except Exception as e:
             logger.error(f"Failed to update active tenant for user {user_id}: {e}")

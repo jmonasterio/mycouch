@@ -202,7 +202,7 @@ If claim is missing after refresh, Clerk JWT Template may not be configured corr
 ### Manual Tasks (Not Automated)
 1. Configure JWT Template in Clerk Dashboard
    - Template Name: `roady`
-   - Claim: `active_tenant_id = {{session.public_metadata.active_tenant_id}}`
+   - Claim: `active_tenant_id = {{user.public_metadata.active_tenant_id}}`
 
 ### Future Improvements
 1. Add metrics/alerts for JWT template configuration issues

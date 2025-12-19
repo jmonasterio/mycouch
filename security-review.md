@@ -123,8 +123,8 @@ The entire tenant isolation model depends on Clerk injecting `active_tenant_id` 
 {
   "Template Name": "roady",
   "Claims Mapping": {
-    "active_tenant_id": "{{session.public_metadata.active_tenant_id}}",
-    "tenant_id": "{{session.public_metadata.active_tenant_id}}"
+    "active_tenant_id": "{{user.public_metadata.active_tenant_id}}",
+    "tenant_id": "{{user.public_metadata.active_tenant_id}}"
   }
 }
 ```
