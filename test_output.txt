@@ -1,0 +1,42 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.9, pytest-8.4.2, pluggy-1.6.0 -- C:\Users\jorge.000\AppData\Local\Programs\Python\Python313\python.exe
+cachedir: .pytest_cache
+rootdir: c:\github\mycouch
+configfile: pytest.ini
+plugins: anyio-4.12.0, asyncio-1.3.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... [OK] Loaded .env from c:\github\mycouch\.env
+collected 1 item
+
+tests/test_virtual_endpoints_manual.py::TestTenantEndpoints::test_update_tenant 
+[POST] http://localhost:5985/__tenants
+Body: {
+  "name": "Test Tenant for Update"
+}
+Status: 502
+Response (text): Bad Gateway
+DEBUG: Create tenant failed: {'text': 'Bad Gateway', 'status_code': 502, '_raw_response': True}
+FAILED
+
+================================== FAILURES ===================================
+___________________ TestTenantEndpoints.test_update_tenant ____________________
+
+self = <tests.test_virtual_endpoints_manual.TestTenantEndpoints object at 0x00000000053A9350>
+client = <tests.test_virtual_endpoints_manual.VirtualTableClient object at 0x000000000511E270>
+
+    def test_update_tenant(self, client):
+        """Test: Tenant owner can update tenant"""
+        # Create a tenant
+        result = client.create_tenant("Test Tenant for Update")
+        tenant_id = result.get("_id")
+    
+        if result.get("_status_code") != 200:
+            print(f"DEBUG: Create tenant failed: {result}")
+>           pytest.fail(f"Failed to create tenant: {result.get('detail')}")
+E           Failed: Failed to create tenant: None
+
+tests\test_virtual_endpoints_manual.py:300: Failed
+=========================== short test summary info ===========================
+FAILED tests/test_virtual_endpoints_manual.py::TestTenantEndpoints::test_update_tenant
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+============================= 1 failed in 13.21s ==============================

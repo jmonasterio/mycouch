@@ -29,8 +29,11 @@ from .auth_log_service import AuthLogService
 from .invite_service import InviteService
 from .tenant_routes import create_tenant_router
 from .virtual_tables import VirtualTableHandler, VirtualTableMapper
+from .session_service import SessionService
+from .cleanup_service import CleanupService
 from .bootstrap import BootstrapManager
 from .index_bootstrap import IndexBootstrap
+from .tenant_service import TenantService
 from . import auth_middleware
 
 # Load environment variables
@@ -95,8 +98,9 @@ ALLOWED_ENDPOINTS = {
 # Validation: Ensure required configuration is set
 missing_vars = []
 
-if not CLERK_ISSUER_URL:
-    missing_vars.append("CLERK_ISSUER_URL")
+# CLERK_ISSUER_URL is optional - can come from app config in couch-sitter
+# if not CLERK_ISSUER_URL:
+#     missing_vars.append("CLERK_ISSUER_URL")
 
 if not COUCHDB_INTERNAL_URL:
     missing_vars.append("COUCHDB_INTERNAL_URL")
@@ -116,8 +120,9 @@ if not PROXY_PORT:
 if not LOG_LEVEL:
     missing_vars.append("LOG_LEVEL")
 
-if not CLERK_SECRET_KEY:
-    missing_vars.append("CLERK_SECRET_KEY")
+# CLERK_SECRET_KEY is now optional - comes from app config in couch-sitter
+# if not CLERK_SECRET_KEY:
+#     missing_vars.append("CLERK_SECRET_KEY")
 
 if not TENANT_FIELD:
     missing_vars.append("TENANT_FIELD")
@@ -143,9 +148,13 @@ except ValueError:
     raise ValueError("USER_CACHE_TTL_SECONDS must be a valid integer. Configure this in your .env file.")
 
 # Clean up URLs after validation
-CLERK_ISSUER_URL = CLERK_ISSUER_URL.rstrip("/")
+if CLERK_ISSUER_URL:
+    CLERK_ISSUER_URL = CLERK_ISSUER_URL.rstrip("/")
+    CLERK_JWKS_URL = f"{CLERK_ISSUER_URL}/.well-known/jwks.json"
+else:
+    CLERK_JWKS_URL = None
+
 COUCH_SITTER_DB_URL = COUCH_SITTER_DB_URL.rstrip("/")
-CLERK_JWKS_URL = f"{CLERK_ISSUER_URL}/.well-known/jwks.json"
 
 # Setup logging with timing
 logging.basicConfig(
@@ -190,8 +199,16 @@ clerk_service = ClerkService(
 # Set clerk_service for auth_middleware
 auth_middleware.set_clerk_service(clerk_service)
 
+# Initialize Session Service (for per-device/per-session tenant mapping)
+session_service = SessionService(dal)
+logger.info("✓ Initialized session service")
+
+# Initialize Cleanup Service (for periodic cleanup of expired sessions)
+cleanup_service = CleanupService(dal, cleanup_interval_hours=24)
+logger.info("✓ Initialized cleanup service")
+
 # Initialize Virtual Tables and Bootstrap managers
-virtual_table_handler = VirtualTableHandler(dal)
+virtual_table_handler = VirtualTableHandler(dal, clerk_service, APPLICATIONS, session_service)
 bootstrap_manager = BootstrapManager(dal)
 logger.info("✓ Initialized virtual tables and bootstrap managers")
 
@@ -256,7 +273,10 @@ def get_clerk_jwks_client(issuer: str) -> Optional[PyJWKClient]:
         return None
 
 def verify_clerk_jwt(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Verify Clerk JWT token (RS256). Returns (payload, error_reason)"""
+    """Verify Clerk JWT token (RS256). Returns (payload, error_reason)
+    
+    Note: Set SKIP_JWT_EXPIRATION_CHECK=true in .env to skip expiration validation (dev/testing only)
+    """
     try:
         # 1. Extract issuer from unverified token
         unverified_payload = decode_token_unsafe(token)
@@ -292,6 +312,9 @@ def verify_clerk_jwt(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str
         signing_key = jwks_client.get_signing_key_from_jwt(token)
 
         # Verify token with Clerk's public key
+        # Check if expiration validation should be skipped (for dev/testing)
+        skip_exp_check = os.getenv("SKIP_JWT_EXPIRATION_CHECK", "false").lower() == "true"
+        
         payload = jwt.decode(
             token,
             signing_key.key,
@@ -301,9 +324,13 @@ def verify_clerk_jwt(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str
             options={
                 "verify_aud": False,
                 "verify_iss": True,
+                "verify_exp": not skip_exp_check,  # Skip expiration check if configured
                 "leeway": 300  # Allow 5 minutes of clock skew (increased from 60s to handle larger drifts)
             }
         )
+        
+        if skip_exp_check:
+            logger.warning("⚠️ JWT expiration check DISABLED - development/testing mode only")
 
         logger.debug(f"Clerk JWT validated successfully")
         return payload, None
@@ -381,18 +408,24 @@ def is_couch_sitter_app(payload: Dict[str, Any], request_path: str = None) -> bo
 
 async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> str:
     """
-    Extract tenant ID from JWT payload using user/tenant management system.
+    Extract tenant ID from JWT payload with 5-level lookup chain.
 
-    This function supports both personal tenant (couch-sitter) and multi-tenant app modes:
-    - For couch-sitter: Always uses personal tenant
-    - For multi-tenant apps: Uses active tenant from Clerk metadata
+    This function implements automatic tenant discovery with multi-level fallback:
+    - Level 1: Session cache (fastest)
+    - Level 2: User document default
+    - Level 3: First user-owned tenant
+    - Level 4: Create new tenant (if user has none)
+    - Level 5: Error (shouldn't reach here)
+
+    For couch-sitter requests: Uses personal tenant (existing behavior)
+    For multi-tenant requests: Uses 5-level discovery chain
 
     Args:
         payload: JWT payload dictionary
         request_path: The request path (optional, for database name extraction)
 
     Returns:
-        Tenant ID string
+        Tenant ID string (without prefix)
     """
     import hashlib
 
@@ -402,82 +435,191 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
         logger.error("Missing 'sub' claim in JWT - cannot determine tenant")
         raise ValueError("Missing 'sub' claim in JWT")
 
-    # Get JWT token from payload for Clerk service (extract from original token if available)
-    # For now, we'll work with the payload data we have
-    user_info = {
-        "sub": sub,
-        "user_id": sub,  # In Clerk, sub is the user ID
-        "email": payload.get("email"),
-        "name": payload.get("name") or payload.get("given_name"),
-        "session_id": payload.get("sid")  # Session ID if available
-    }
-
-    # Determine if this is a couch-sitter request (special case)
-    # Everything else is treated as a multi-tenant database
-    is_couch_sitter_request = is_couch_sitter_app(payload, request_path)
-
-    logger.debug(f"Application type detected: {'couch-sitter' if is_couch_sitter_request else 'multi-tenant (roady-like)'}")
-
-    # Create sub hash for cache lookup
+    # Hash the sub for internal use
     sub_hash = hashlib.sha256(sub.encode('utf-8')).hexdigest()
 
-    # For couch-sitter, always use personal tenant (simple behavior)
-    if is_couch_sitter_request:
-        logger.debug(f"Couch-sitter request - using personal tenant for sub '{sub}'")
+    # Determine if this is a couch-sitter request (special case)
+    is_couch_sitter_request = is_couch_sitter_app(payload, request_path)
 
+    logger.debug(f"[EXTRACT_TENANT] Application: {'couch-sitter' if is_couch_sitter_request else 'multi-tenant'}")
+
+    # For couch-sitter, use existing personal tenant behavior
+    if is_couch_sitter_request:
+        logger.debug(f"[EXTRACT_TENANT] Level 0: couch-sitter request, using personal tenant")
+        
         # Try cache first
         cached_info = user_cache.get_user_by_sub_hash(sub_hash)
         if cached_info:
-            logger.debug(f"Using cached tenant info for couch-sitter sub '{sub}': tenant_id={cached_info.tenant_id}")
             return cached_info.tenant_id
 
-        # Determine database name from request path
-        # Format is usually /<db_name>/...
-        requested_db_name = "couch-sitter"  # Default
+        # Cache miss - fetch from couch-sitter database
+        requested_db_name = "couch-sitter"
         if request_path:
             parts = request_path.strip('/').split('/')
             if parts:
                 requested_db_name = parts[0]
 
-        # Cache miss - fetch from couch-sitter database
         try:
             user_tenant_info = await couch_sitter_service.get_user_tenant_info(
                 sub=sub,
-                email=user_info.get("email"),
-                name=user_info.get("name"),
+                email=payload.get("email"),
+                name=payload.get("name") or payload.get("given_name"),
                 requested_db_name=requested_db_name
             )
-
-            # Cache the result
             user_cache.set_user(sub_hash, user_tenant_info)
-
-            logger.info(f"Retrieved personal tenant for couch-sitter sub '{sub}': tenant_id={user_tenant_info.tenant_id}")
+            logger.info(f"[EXTRACT_TENANT] Retrieved personal tenant: {user_tenant_info.tenant_id}")
             return user_tenant_info.tenant_id
-
         except Exception as e:
-            logger.error(f"Failed to get tenant info for couch-sitter sub '{sub}': {e}")
+            logger.error(f"[EXTRACT_TENANT] Failed to get personal tenant: {e}")
             raise
 
-    # For multi-tenant apps (not couch-sitter), get active tenant from JWT
-    logger.debug(f"Multi-tenant request - checking for active tenant in JWT for sub '{sub}'")
+    # ============================================================================
+    # MULTI-TENANT REQUEST - 5-LEVEL DISCOVERY CHAIN
+    # ============================================================================
+    logger.debug(f"[EXTRACT_TENANT] Multi-tenant request - starting 5-level discovery")
 
-    # Check for active_tenant_id claim in JWT
-    active_tenant_id = payload.get("active_tenant_id") or payload.get("tenant_id")
-    
-    # Check metadata inside JWT if not at top level (Clerk sometimes puts it there)
-    if not active_tenant_id and payload.get("metadata"):
-        active_tenant_id = payload.get("metadata").get("active_tenant_id")
+    sid = payload.get("sid")
+    app_id = payload.get("iss")  # Clerk issuer (app identifier)
+    user_name = payload.get("name") or payload.get("given_name")
+
+    # ============================================================================
+    # LEVEL 1: Session cache (per-device tenant)
+    # ============================================================================
+    if sid and session_service:
+        try:
+            logger.debug(f"[EXTRACT_TENANT] Level 1: Checking session cache for sid={sid}")
+            active_tenant_id = await session_service.get_active_tenant(sid)
+            if active_tenant_id:
+                logger.info(f"[EXTRACT_TENANT] ✅ Level 1 HIT: Found session tenant: {active_tenant_id}")
+                return active_tenant_id
+        except Exception as e:
+            logger.warning(f"[EXTRACT_TENANT] Level 1 failed: {e}")
+
+    logger.debug(f"[EXTRACT_TENANT] Level 1 miss - falling through")
+
+    # ============================================================================
+    # LEVEL 2: User document default
+    # ============================================================================
+    try:
+        logger.debug(f"[EXTRACT_TENANT] Level 2: Checking user doc for default tenant")
+        user_doc_id = f"user_{sub_hash}"
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{COUCHDB_INTERNAL_URL}/couch-sitter/{user_doc_id}",
+                auth=(COUCHDB_USER, COUCHDB_PASSWORD),
+            )
+
+            if response.status_code == 200:
+                user_doc = response.json()
+                user_default = user_doc.get("active_tenant_id")
+                
+                if user_default:
+                    logger.info(f"[EXTRACT_TENANT] ✅ Level 2 HIT: Found user default: {user_default}")
+                    
+                    # Create/update session with this default
+                    if sid and session_service:
+                        try:
+                            await session_service.create_session(sid, sub_hash, user_default, app_id)
+                            logger.debug(f"[EXTRACT_TENANT] Cached session {sid} with tenant {user_default}")
+                        except Exception as e:
+                            logger.warning(f"[EXTRACT_TENANT] Failed to create session: {e}")
+                    
+                    return user_default
+
+                logger.debug(f"[EXTRACT_TENANT] Level 2 miss - user doc has no active_tenant_id")
+    except Exception as e:
+        logger.warning(f"[EXTRACT_TENANT] Level 2 failed: {e}")
+
+    # ============================================================================
+    # LEVEL 3: Query first user-owned tenant
+    # ============================================================================
+    try:
+        logger.debug(f"[EXTRACT_TENANT] Level 3: Querying user's tenants")
+        if not hasattr(extract_tenant, '_tenant_service'):
+            extract_tenant._tenant_service = TenantService(
+                COUCHDB_INTERNAL_URL,
+                COUCHDB_USER,
+                COUCHDB_PASSWORD
+            )
         
-    if active_tenant_id:
-        logger.debug(f"Found active tenant in JWT claims: {active_tenant_id}")
-        return active_tenant_id
-    
-    # Missing active_tenant_id - REJECT the request (CWE-287 security fix)
-    # No fallback to clerk API or bootstrap flow
-    logger.warning(f"SECURITY: Missing active_tenant_id in JWT for multi-tenant request from sub '{sub}' - rejecting request")
+        tenant_service = extract_tenant._tenant_service
+        tenants = await tenant_service.query_user_tenants(sub_hash, database="roady")
+        
+        if tenants:
+            first_tenant = tenants[0]
+            tenant_id = first_tenant["_id"].replace("tenant_", "")  # Remove prefix for virtual ID
+            
+            logger.info(f"[EXTRACT_TENANT] ✅ Level 3 HIT: Found existing tenant: {tenant_id}")
+            
+            # Update user default and create session
+            try:
+                await tenant_service.set_user_default_tenant(sub_hash, tenant_id, database="couch-sitter")
+                logger.debug(f"[EXTRACT_TENANT] Set user default to {tenant_id}")
+            except Exception as e:
+                logger.warning(f"[EXTRACT_TENANT] Failed to set user default: {e}")
+            
+            if sid and session_service:
+                try:
+                    await session_service.create_session(sid, sub_hash, tenant_id, app_id)
+                except Exception as e:
+                    logger.warning(f"[EXTRACT_TENANT] Failed to create session: {e}")
+            
+            return tenant_id
+        
+        logger.debug(f"[EXTRACT_TENANT] Level 3 miss - user has no tenants")
+    except Exception as e:
+        logger.warning(f"[EXTRACT_TENANT] Level 3 failed: {e}")
+
+    # ============================================================================
+    # LEVEL 4: Create new tenant for user
+    # ============================================================================
+    try:
+        logger.debug(f"[EXTRACT_TENANT] Level 4: Creating new tenant for user")
+        if not hasattr(extract_tenant, '_tenant_service'):
+            extract_tenant._tenant_service = TenantService(
+                COUCHDB_INTERNAL_URL,
+                COUCHDB_USER,
+                COUCHDB_PASSWORD
+            )
+        
+        tenant_service = extract_tenant._tenant_service
+        
+        # Create tenant
+        result = await tenant_service.create_tenant(
+            sub_hash,
+            user_name=user_name,
+            database="roady"
+        )
+        tenant_id = result["tenant_id"]
+        
+        logger.info(f"[EXTRACT_TENANT] ✅ Level 4: Created new tenant: {tenant_id}")
+        
+        # Set as user default
+        try:
+            await tenant_service.set_user_default_tenant(sub_hash, tenant_id, database="couch-sitter")
+            logger.debug(f"[EXTRACT_TENANT] Set user default to newly created tenant {tenant_id}")
+        except Exception as e:
+            logger.warning(f"[EXTRACT_TENANT] Failed to set user default: {e}")
+        
+        # Create session
+        if sid and session_service:
+            try:
+                await session_service.create_session(sid, sub_hash, tenant_id, app_id)
+            except Exception as e:
+                logger.warning(f"[EXTRACT_TENANT] Failed to create session: {e}")
+        
+        return tenant_id
+    except Exception as e:
+        logger.error(f"[EXTRACT_TENANT] Level 4 failed: {e}")
+
+    # ============================================================================
+    # LEVEL 5: Error (all levels exhausted)
+    # ============================================================================
+    logger.error(f"[EXTRACT_TENANT] ❌ All levels exhausted - cannot determine tenant for {sub}")
     raise HTTPException(
-        status_code=401,
-        detail="Missing active_tenant_id claim in token. Please refresh your authentication token and try again."
+        status_code=500,
+        detail="Unable to determine or create tenant. Please contact support."
     )
 
 def is_system_doc(doc_id: str) -> bool:
@@ -799,10 +941,16 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"Logging level: {LOG_LEVEL}")
 
+    # Start periodic cleanup service
+    logger.info(f"Starting periodic cleanup service (interval: 24 hours)")
+    cleanup_service.start_periodic_cleanup()
+
     yield
 
-    # Shutdown (if needed in the future)
+    # Shutdown
     logger.info("Shutting down CouchDB JWT Proxy")
+    await cleanup_service.stop_periodic_cleanup()
+    logger.info("Cleanup service stopped")
 
 # Rate Limiting (CWE-770: No Rate Limiting on Auth Endpoints)
 limiter = Limiter(key_func=get_remote_address)
@@ -930,66 +1078,70 @@ async def initialize_applications():
 @app.post("/choose-tenant")
 @limiter.limit("10/minute")
 async def choose_tenant(
-request: Request,
-tenant_request: Dict[str, str] = Body(...),
-authorization: Optional[str] = Header(None)
+    request: Request,
+    tenant_request: Dict[str, str] = Body(...),
+    authorization: Optional[str] = Header(None)
 ):
     """
     Set the active tenant for the authenticated user.
     This endpoint updates the user's session metadata with the chosen active tenant.
     """
+    logger.info("[CHOOSE-TENANT] POST /choose-tenant called")
+    
     if not authorization:
+        logger.warning("[CHOOSE-TENANT] Missing authorization header")
         raise HTTPException(status_code=401, detail="Missing authorization header")
 
     if not authorization.startswith("Bearer "):
+        logger.warning("[CHOOSE-TENANT] Invalid authorization header format")
         raise HTTPException(status_code=401, detail="Invalid authorization header format")
 
     token = authorization.split(" ", 1)[1]
+    logger.debug(f"[CHOOSE-TENANT] Got bearer token")
 
     # Validate request body
     if "tenantId" not in tenant_request:
+        logger.warning("[CHOOSE-TENANT] Missing tenantId in request body")
         raise HTTPException(status_code=400, detail="Missing tenantId in request body")
 
     tenant_id = tenant_request["tenantId"]
+    logger.info(f"[CHOOSE-TENANT] Request to set active tenant to: {tenant_id}")
 
     try:
         # Validate JWT and extract user information
+        logger.debug("[CHOOSE-TENANT] Extracting user info from JWT")
         user_info = await clerk_service.get_user_from_jwt(token)
         if not user_info:
+            logger.error("[CHOOSE-TENANT] Invalid JWT token")
             raise HTTPException(status_code=401, detail="Invalid JWT token")
+        
+        logger.info(f"[CHOOSE-TENANT] User info from JWT: sub={user_info.get('sub')}, iss={user_info.get('iss')}")
 
         # Get user's current tenant information
+        logger.debug("[CHOOSE-TENANT] Getting user tenant info from couch_sitter_service")
         user_tenant_info = await couch_sitter_service.get_user_tenant_info(
             sub=user_info["sub"],
             email=user_info.get("email"),
             name=user_info.get("name")
         )
+        logger.debug(f"[CHOOSE-TENANT] Got user_tenant_info: user_id={user_tenant_info.user_id}")
 
         # Get all accessible tenants for validation
+        logger.debug("[CHOOSE-TENANT] Getting accessible tenants for user")
         tenants, personal_tenant_id = await couch_sitter_service.get_user_tenants(user_info["sub"])
         accessible_tenant_ids = [t["tenantId"] for t in tenants]
+        logger.info(f"[CHOOSE-TENANT] User {user_info['sub']} has accessible tenants: {accessible_tenant_ids}")
 
         # Verify the user has access to this tenant
         if tenant_id not in accessible_tenant_ids:
-            logger.warning(f"User {user_info['sub']} attempted to select inaccessible tenant: {tenant_id}")
-            logger.warning(f"Accessible tenants: {accessible_tenant_ids}")
+            logger.warning(f"[CHOOSE-TENANT] User {user_info['sub']} attempted to select inaccessible tenant: {tenant_id}")
+            logger.warning(f"[CHOOSE-TENANT] Accessible tenants: {accessible_tenant_ids}")
             raise HTTPException(status_code=403, detail="Access denied: tenant not found")
 
-        # Update active tenant in user metadata (appears in JWT via {{user.public_metadata.active_tenant_id}})
-        if clerk_service.is_configured():
-            success = await clerk_service.update_user_active_tenant(
-                user_id=user_info.get("sub"),
-                tenant_id=tenant_id,
-                issuer=user_info.get("iss")
-            )
-            if success:
-                logger.info(f"Updated active tenant in user metadata for user {user_info['user_id']}: {tenant_id}")
-                logger.info(f"ℹ️ Client should refresh token to get updated active_tenant_id claim in JWT")
-            else:
-                logger.warning(f"Failed to update active tenant in user metadata for user {user_info['user_id']}")
-        else:
-            logger.warning("Clerk Backend API not configured - cannot update active tenant")
+        # Note: Active tenant is now stored in session documents (per-device)
+        # No need to update Clerk metadata - session service handles it
 
+        logger.info(f"[CHOOSE-TENANT] Returning success response with tenant {tenant_id}")
         return {
             "success": True,
             "message": "Active tenant updated successfully",
@@ -1000,7 +1152,7 @@ authorization: Optional[str] = Header(None)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error choosing tenant: {e}")
+        logger.error(f"[CHOOSE-TENANT] Error choosing tenant: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to set active tenant")
 
 @app.get("/active-tenant")
@@ -1387,8 +1539,11 @@ async def update_user(user_id: str, request: Request, authorization: Optional[st
     if not requesting_user_id:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
+    issuer = payload.get("iss")
+    sid = payload.get("sid")  # Clerk session ID for per-device tenant mapping
+    
     body = await request.json()
-    return await virtual_table_handler.update_user(user_id, requesting_user_id, body)
+    return await virtual_table_handler.update_user(user_id, requesting_user_id, body, issuer=issuer, sid=sid)
 
 @app.delete("/__users/{user_id}")
 async def delete_user(user_id: str, authorization: Optional[str] = Header(None)):
@@ -1456,6 +1611,7 @@ async def create_tenant(request: Request, authorization: Optional[str] = Header(
     if not requesting_user_id:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
+    logger.info(f"[ROUTE] POST /__tenants: requesting_user_id={requesting_user_id}")
     body = await request.json()
     result = await virtual_table_handler.create_tenant(requesting_user_id, body)
     return result
@@ -1475,6 +1631,7 @@ async def update_tenant(tenant_id: str, request: Request, authorization: Optiona
     if not requesting_user_id:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
+    logger.info(f"[ROUTE] PUT /__tenants/{tenant_id}: requesting_user_id={requesting_user_id}")
     body = await request.json()
     return await virtual_table_handler.update_tenant(tenant_id, requesting_user_id, body)
 

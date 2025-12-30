@@ -156,40 +156,38 @@ class TestServiceIntegration:
         assert stats["valid_entries"] == 1
 
     @pytest.mark.asyncio
-    async def test_clerk_session_management_with_tenant_info(self, mock_services):
-        """Test Clerk session management integration with tenant information"""
+    async def test_clerk_user_metadata_management_with_tenant_info(self, mock_services):
+        """Test Clerk user metadata management integration with tenant information"""
         clerk_service, couch_sitter_service, mock_clerk_client = mock_services
-
+    
         # First, create user and get tenant info
         user_tenant_info = await couch_sitter_service.get_user_tenant_info(
-            "session_user",
-            "session@example.com",
-            "Session User"
+            "metadata_user",
+            "metadata@example.com",
+            "Metadata User"
         )
-
-        # Mock Clerk session metadata operations
-        mock_session = MagicMock()
-        mock_session.public_user_data = MagicMock()
-        mock_session.public_user_data.get.return_value = {}
-        mock_clerk_client.sessions.get.return_value = mock_session
-
-        # Test updating active tenant in session
+    
+        # Mock Clerk user metadata operations
+        mock_user = MagicMock()
+        mock_user.public_metadata = {}
+        mock_clerk_client.users.get.return_value = mock_user
+    
+        # Test updating active tenant in user metadata
         success = await clerk_service.update_active_tenant_in_session(
-            "session_user",
-            "session_123",
+            "metadata_user",
             user_tenant_info.tenant_id
         )
-
+    
         assert success is True
-        mock_clerk_client.sessions.update.assert_called_once()
-
-        # Test retrieving active tenant from session
-        # Mock session metadata to return the tenant we just set
-        mock_session.public_user_data.get.return_value = {
+        mock_clerk_client.users.update.assert_called_once()
+    
+        # Test retrieving active tenant from user metadata
+        # Mock user metadata to return the tenant we just set
+        mock_user.public_metadata = {
             "active_tenant_id": user_tenant_info.tenant_id
         }
-
-        active_tenant = await clerk_service.get_user_active_tenant("session_user", "session_123")
+    
+        active_tenant = await clerk_service.get_user_active_tenant("metadata_user")
         assert active_tenant == user_tenant_info.tenant_id
 
     @pytest.mark.asyncio
@@ -244,9 +242,9 @@ class TestServiceIntegration:
         clerk_service.clients.clear()
         session_result = await clerk_service.verify_session_token("token")
         assert session_result is None
-
-        metadata_result = await clerk_service.get_user_session_metadata("user", "session")
-        assert metadata_result is None
+        
+        update_result = await clerk_service.update_active_tenant_in_session("user", "tenant")
+        assert update_result is False
 
     @pytest.mark.asyncio
     async def test_performance_with_concurrent_users(self, mock_services):

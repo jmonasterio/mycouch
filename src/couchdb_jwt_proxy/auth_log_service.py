@@ -207,10 +207,11 @@ class AuthLogService:
                 logger.debug(f"Logged auth event: {action}/{status} for user={user_id} tenant={tenant_id}")
                 return True
             else:
-                logger.warning(f"Failed to log auth event: {response.status_code} {response.text}")
+                logger.debug(f"Failed to log auth event: {response.status_code}")
                 return False
         except Exception as e:
-            logger.error(f"Error logging auth event: {e}")
+            # Silently fail on connection errors - auth logging is non-critical
+            logger.debug(f"Auth log skipped (database unavailable): {type(e).__name__}")
             return False
 
     async def log_login(

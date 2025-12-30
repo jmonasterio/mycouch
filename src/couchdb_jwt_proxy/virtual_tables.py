@@ -20,6 +20,16 @@ import hashlib
 logger = logging.getLogger(__name__)
 
 
+# Session service will be injected by main.py
+_session_service = None
+
+
+def set_session_service(session_service):
+    """Set the session service for use in virtual table handler."""
+    global _session_service
+    _session_service = session_service
+
+
 class VirtualTableMapper:
     """Maps virtual IDs to internal CouchDB document IDs"""
 
@@ -106,10 +116,19 @@ class VirtualTableAccessControl:
     def can_update_tenant(user_id: str, tenant_doc: Dict[str, Any], field: str) -> bool:
         """Only owner can update; allowed fields: name, metadata"""
         if not tenant_doc:
+            logger.warning(f"[CAN_UPDATE_TENANT] tenant_doc is None/falsy")
             return False
         
         # Only owner can update
-        if tenant_doc.get("userId") != user_id:
+        # Normalize both values to handle whitespace/encoding issues
+        tenant_userId = (tenant_doc.get("userId") or "").strip()
+        normalized_user_id = (user_id or "").strip()
+        is_owner = tenant_userId == normalized_user_id
+        
+        logger.info(f"[CAN_UPDATE_TENANT] user_id='{normalized_user_id}', tenant_userId='{tenant_userId}', is_owner={is_owner}")
+        
+        if not is_owner:
+            logger.warning(f"[CAN_UPDATE_TENANT] User is not owner of tenant ('{normalized_user_id}' != '{tenant_userId}')")
             return False
         
         # Allowed fields for update
@@ -121,7 +140,10 @@ class VirtualTableAccessControl:
         """Only owner can delete"""
         if not tenant_doc:
             return False
-        return tenant_doc.get("userId") == user_id
+        # Normalize both values to handle whitespace/encoding issues
+        tenant_userId = (tenant_doc.get("userId") or "").strip()
+        normalized_user_id = (user_id or "").strip()
+        return tenant_userId == normalized_user_id
 
 
 class VirtualTableValidator:
@@ -232,9 +254,12 @@ class VirtualTableChangesFilter:
 class VirtualTableHandler:
     """Handle virtual table HTTP operations"""
 
-    def __init__(self, dal):
-        """Initialize with DAL (data access layer)"""
+    def __init__(self, dal, clerk_service=None, applications=None, session_service=None):
+        """Initialize with DAL (data access layer), Clerk service, application config, and session service"""
         self.dal = dal
+        self.clerk_service = clerk_service
+        self.applications = applications or {}  # App configs from couch-sitter
+        self.session_service = session_service  # Session service for per-device tenant mapping
 
     async def get_user(self, user_id: str, requesting_user_id: str) -> Dict[str, Any]:
         """
@@ -262,15 +287,56 @@ class VirtualTableHandler:
         
         return doc
 
+    async def _track_session_tenant_switch(
+        self,
+        sid: Optional[str],
+        user_id_hash: str,
+        active_tenant_id: str,
+        app_id: Optional[str] = None
+    ) -> None:
+        """
+        Track a tenant switch in the session document.
+        Called when user updates their active_tenant_id.
+        
+        Args:
+            sid: Session ID from JWT (optional)
+            user_id_hash: Hashed user ID
+            active_tenant_id: The new active tenant ID
+            app_id: Clerk issuer/app identifier (optional)
+        """
+        if not sid or not self.session_service:
+            logger.debug(f"[VIRTUAL] Skipping session tracking: sid={sid}, session_service={bool(self.session_service)}")
+            return
+        
+        try:
+            await self.session_service.create_session(
+                sid=sid,
+                user_id=user_id_hash,
+                active_tenant_id=active_tenant_id,
+                app_id=app_id
+            )
+            logger.info(f"[VIRTUAL] ✓ Tracked tenant switch in session: {sid} → {active_tenant_id}")
+        except Exception as e:
+            logger.warning(f"[VIRTUAL] Failed to track session tenant switch: {e}")
+            # Don't fail the user update if session tracking fails
+
     async def update_user(
         self,
         user_id: str,
         requesting_user_id: str,
-        updates: Dict[str, Any]
+        updates: Dict[str, Any],
+        issuer: Optional[str] = None,
+        sid: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         PUT /__users/<id>
         Update user document; allowed fields only; user can only update self.
+        
+        Args:
+            user_id: Virtual user ID
+            requesting_user_id: JWT 'sub' claim
+            updates: Fields to update
+            issuer: JWT 'iss' claim; used to find correct Clerk secret key
         """
         # Access control
         if not VirtualTableAccessControl.can_read_user(requesting_user_id, user_id):
@@ -327,6 +393,16 @@ class VirtualTableHandler:
                 put_result = await self.dal.put_document("couch-sitter", internal_id, merged_doc)
                 # Add the _rev from put result to our merged_doc and return it
                 merged_doc["_rev"] = put_result.get("_rev")
+                
+                # If active_tenant_id was updated, track in session document
+                if "active_tenant_id" in updates:
+                    await self._track_session_tenant_switch(
+                        sid=sid,
+                        user_id_hash=user_id,  # This is the hashed user ID from virtual URL
+                        active_tenant_id=updates["active_tenant_id"],
+                        app_id=issuer
+                    )
+                
                 return merged_doc
             except HTTPException as e:
                 if "conflict" in str(e.detail).lower():
@@ -388,8 +464,8 @@ class VirtualTableHandler:
                 raise HTTPException(status_code=404, detail="Tenant not found")
             raise
         
-        # Filter out soft-deleted docs
-        if doc.get("deleted"):
+        # Filter out soft-deleted docs (check both deletedAt for new format and deleted for legacy)
+        if doc.get("deletedAt") or doc.get("deleted"):
             raise HTTPException(status_code=404, detail="Tenant not found")
         
         # Access control: user must be member
@@ -408,12 +484,16 @@ class VirtualTableHandler:
         Returns all tenants user is member of.
         Converts internal IDs to virtual format for API response.
         """
-        # Query all tenant docs for this user
+        # Query all tenant docs for this user (exclude soft-deleted documents)
+        # Filter out docs where either deletedAt or deleted fields are set (for both new and legacy formats)
         query = {
             "selector": {
                 "type": "tenant",
                 "userIds": {"$elemMatch": {"$eq": requesting_user_id}},
-                "deleted": {"$exists": False}
+                "$and": [
+                    {"deletedAt": {"$exists": False}},
+                    {"deleted": {"$ne": True}}
+                ]
             }
         }
         
@@ -425,8 +505,8 @@ class VirtualTableHandler:
         
         docs = result.get("docs", [])
         
-        # Filter out soft-deleted and convert _id to virtual format
-        docs = [doc for doc in docs if not doc.get("deleted")]
+        # Filter out soft-deleted (in-memory fallback filter) and convert _id to virtual format
+        docs = [doc for doc in docs if not doc.get("deletedAt") and not doc.get("deleted")]
         for doc in docs:
             if doc.get("_id", "").startswith("tenant_"):
                 doc["_id"] = VirtualTableMapper.tenant_internal_to_virtual(doc["_id"])
@@ -449,6 +529,7 @@ class VirtualTableHandler:
         
         # Create tenant doc
         now = datetime.utcnow().isoformat() + "Z"
+        logger.info(f"[VIRTUAL] Creating tenant with owner: {requesting_user_id}")
         tenant_doc = {
             "_id": internal_id,
             "type": "tenant",
@@ -484,6 +565,11 @@ class VirtualTableHandler:
         PUT /__tenants/<id>
         Update tenant document; only owner can update; allowed fields only.
         """
+        # Validate requesting_user_id
+        if not requesting_user_id:
+            logger.error(f"[VIRTUAL] update_tenant called with empty requesting_user_id")
+            raise HTTPException(status_code=400, detail="Missing user authentication")
+        
         # Map virtual to internal ID
         internal_id = VirtualTableMapper.tenant_virtual_to_internal(tenant_id)
         
@@ -496,7 +582,11 @@ class VirtualTableHandler:
             raise
         
         # Access control: only owner
+        tenant_owner = current_doc.get('userId')
+        logger.info(f"[VIRTUAL] Update tenant access check: tenant_id={tenant_id}, requesting_user_id='{requesting_user_id}', tenant_userId='{tenant_owner}'")
+        
         if not VirtualTableAccessControl.can_update_tenant(requesting_user_id, current_doc, "_"):
+            logger.error(f"[VIRTUAL] ✗ Update tenant REJECTED: '{requesting_user_id}' is not owner '{tenant_owner}'")
             raise HTTPException(status_code=403, detail="Only owner can update this tenant")
         
         # Validate immutable fields
@@ -554,7 +644,8 @@ class VirtualTableHandler:
     ) -> Dict[str, Any]:
         """
         DELETE /__tenants/<id>
-        Soft-delete tenant; only owner; cannot delete active tenant.
+        Soft-delete tenant in couch-sitter AND cascade-delete the tenant's database (e.g., roady).
+        Only owner can delete; cannot delete active tenant.
         """
         # Map virtual to internal ID
         internal_id = VirtualTableMapper.tenant_virtual_to_internal(tenant_id)
@@ -578,18 +669,69 @@ class VirtualTableHandler:
                 detail="Cannot delete active tenant. Switch to another tenant first."
             )
         
-        # Soft-delete
-        current_doc["deleted"] = True
+        # Get the database name from the tenant's applicationId
+        # This tells us which database to delete (e.g., "roady")
+        db_name = current_doc.get("applicationId", "").strip()
+        
+        warnings = []
+        tenant_deleted = False
+        db_deleted = False
+        put_result = None
+        
+        # STEP 1: Soft-delete tenant in couch-sitter
+        # Use deletedAt field to match client-side soft-delete field and enable sync consistency
+        current_doc["deletedAt"] = datetime.utcnow().isoformat() + "Z"
         current_doc["updatedAt"] = datetime.utcnow().isoformat() + "Z"
         
         try:
             put_result = await self.dal.put_document("couch-sitter", internal_id, current_doc)
+            tenant_deleted = True
+            logger.info(f"[VIRTUAL] ✓ Soft-deleted tenant in couch-sitter: {tenant_id}")
         except HTTPException as e:
-            if "conflict" in str(e.detail).lower():
-                raise HTTPException(status_code=409, detail="Revision conflict")
-            raise
+            tenant_error = "Revision conflict" if "conflict" in str(e.detail).lower() else str(e.detail)
+            logger.error(f"[VIRTUAL] ✗ Failed to delete tenant doc: {tenant_error}")
+            warnings.append(f"Failed to delete tenant document: {tenant_error}")
+        except Exception as e:
+            tenant_error = str(e)
+            logger.error(f"[VIRTUAL] ✗ Failed to delete tenant doc: {tenant_error}")
+            warnings.append(f"Failed to delete tenant document: {tenant_error}")
         
-        return {"ok": True, "_id": put_result.get("id"), "_rev": put_result.get("_rev")}
+        # STEP 2: Cascade-delete the tenant's database (e.g., DELETE /roady)
+        # This removes all equipment, gigs, and other data for this band
+        if db_name and db_name != "couch-sitter":
+            try:
+                logger.info(f"[VIRTUAL] Cascade-deleting database: {db_name} for tenant: {tenant_id}")
+                await self.dal.delete_database(db_name)
+                db_deleted = True
+                logger.info(f"[VIRTUAL] ✓ Successfully deleted database: {db_name}")
+            except Exception as e:
+                db_error = str(e)
+                logger.error(f"[VIRTUAL] ✗ Failed to delete database {db_name}: {db_error}")
+                warnings.append(f"Failed to delete database '{db_name}': {db_error}")
+        elif db_name == "couch-sitter":
+            logger.warning(f"[VIRTUAL] Skipping database deletion for couch-sitter (system database)")
+        else:
+            logger.warning(f"[VIRTUAL] No applicationId found for tenant {tenant_id}")
+        
+        # BOTH STEPS MUST SUCCEED - fail if both failed or if tenant deletion failed
+        if not tenant_deleted:
+            raise HTTPException(
+                status_code=500,
+                detail=warnings[0] if warnings else "Failed to delete tenant"
+            )
+        
+        response = {
+            "ok": True,
+            "_id": put_result.get("id") if put_result else tenant_id,
+            "_rev": put_result.get("_rev") if put_result else None
+        }
+        
+        # Add warnings if database deletion failed
+        if warnings:
+            response["warnings"] = warnings
+            logger.warning(f"[VIRTUAL] Tenant deleted with warnings: {warnings}")
+        
+        return response
 
     async def get_user_changes(
         self,
@@ -659,12 +801,16 @@ class VirtualTableHandler:
         Virtual table handler: queries couch-sitter internally, no database permission needed.
         """
         try:
-            # Query couch-sitter for tenants this user is member of
+            # Query couch-sitter for tenants this user is member of (exclude soft-deleted)
+            # Filter out docs where either deletedAt (new format) or deleted (legacy) fields are set
             result = await self.dal.query_documents("couch-sitter", {
                 "selector": {
                     "type": "tenant",
                     "userIds": {"$elemMatch": {"$eq": requesting_user_id}},
-                    "deleted": {"$exists": False}
+                    "$and": [
+                        {"deletedAt": {"$exists": False}},
+                        {"deleted": {"$ne": True}}
+                    ]
                 }
             })
         except Exception as e:

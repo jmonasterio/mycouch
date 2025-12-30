@@ -879,8 +879,16 @@ class CouchSitterService:
 
             apps = {}
             for doc in result.get("docs", []):
+                doc_id = doc.get("_id", "unknown")
+                logger.debug(f"[APPS] Processing doc: {doc_id}")
+                logger.debug(f"[APPS]   deletedAt: {doc.get('deletedAt')}")
+                logger.debug(f"[APPS]   type: {doc.get('type')}")
+                logger.debug(f"[APPS]   issuer: {doc.get('issuer')}")
+                logger.debug(f"[APPS]   clerkSecretKey: {'YES' if doc.get('clerkSecretKey') else 'NO'}")
+                
                 # Skip deleted documents
                 if doc.get("deletedAt"):
+                    logger.debug(f"[APPS]   → SKIPPED (deletedAt set)")
                     continue
                     
                 issuer = doc.get("issuer") or doc.get("clerkIssuerId")
@@ -892,7 +900,9 @@ class CouchSitterService:
                     }
                     # Log loaded app (masking secret key)
                     has_key = "Yes" if doc.get("clerkSecretKey") else "No"
-                    logger.info(f"Loaded app: {issuer} -> DBs: {database_names}, Has Key: {has_key}")
+                    logger.info(f"[APPS] ✓ Loaded app: {issuer} -> DBs: {database_names}, Has Key: {has_key}")
+                else:
+                    logger.debug(f"[APPS]   → SKIPPED (missing issuer or databaseNames)")
 
             logger.info(f"Loaded {len(apps)} applications from database")
             return apps

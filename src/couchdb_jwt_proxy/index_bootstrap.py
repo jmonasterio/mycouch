@@ -114,6 +114,18 @@ class IndexBootstrap:
                 "index": {"fields": ["user_id", "status"]},
                 "name": "user-status",
             },
+            {
+                "index": {"fields": ["type", "owner_id"]},
+                "name": "tenant-owner",
+            },
+            {
+                "index": {"fields": ["type", "sid"]},
+                "name": "session-sid",
+            },
+            {
+                "index": {"fields": ["type", "expiresAt"]},
+                "name": "session-expiry",
+            },
         ]
 
         logger.info("📦 Creating indexes on 'couch-sitter'...")

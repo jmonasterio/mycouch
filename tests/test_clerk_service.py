@@ -169,197 +169,91 @@ class TestClerkService:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_get_user_session_metadata_no_client(self, clerk_service):
-        """Test getting session metadata when client is not configured"""
-        clerk_service.clients.clear()
-
-        result = await clerk_service.get_user_session_metadata("user_123", "session_123")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_get_user_session_metadata_success(self, clerk_service_with_client):
-        """Test successful session metadata retrieval"""
-        service, mock_client = clerk_service_with_client
-
-        mock_session = MagicMock()
-        mock_session.public_user_data = MagicMock()
-        mock_session.public_user_data.get.return_value = {
-            "active_tenant_id": "tenant_123",
-            "preferences": {"theme": "dark"}
-        }
-
-        mock_client.sessions.get.return_value = mock_session
-
-        result = await service.get_user_session_metadata("user_123", "session_123")
-
-        assert result is not None
-        assert result["active_tenant_id"] == "tenant_123"
-        assert result["preferences"]["theme"] == "dark"
-        mock_client.sessions.get.assert_called_once_with(session_id="session_123")
-
-    @pytest.mark.asyncio
-    async def test_get_user_session_metadata_no_metadata(self, clerk_service_with_client):
-        """Test session metadata retrieval when no metadata exists"""
-        service, mock_client = clerk_service_with_client
-
-        mock_session = MagicMock()
-        mock_session.public_user_data = None
-
-        mock_client.sessions.get.return_value = mock_session
-
-        result = await service.get_user_session_metadata("user_123", "session_123")
-        assert result == {}
-
-    @pytest.mark.asyncio
-    async def test_get_user_session_metadata_failure(self, clerk_service_with_client):
-        """Test session metadata retrieval failure"""
-        service, mock_client = clerk_service_with_client
-
-        mock_client.sessions.get.side_effect = Exception("Session not found")
-
-        result = await service.get_user_session_metadata("user_123", "session_123")
-        assert result is None
-
-    @pytest.mark.asyncio
     async def test_update_active_tenant_in_session_no_client(self, clerk_service):
         """Test updating active tenant when client is not configured"""
         clerk_service.clients.clear()
-
-        result = await clerk_service.update_active_tenant_in_session("user_123", "session_123", "tenant_456")
+    
+        result = await clerk_service.update_active_tenant_in_session("user_123", "tenant_456")
         assert result is False
-
+    
     @pytest.mark.asyncio
     async def test_update_active_tenant_in_session_success(self, clerk_service_with_client):
         """Test successful active tenant update"""
         service, mock_client = clerk_service_with_client
-
-        # Mock get_user_session_metadata to return existing metadata
-        with patch.object(service, 'get_user_session_metadata', new_callable=AsyncMock) as mock_get_meta:
-            mock_get_meta.return_value = {"existing": "metadata"}
-            
-            # Mock sessions.update to succeed
-            mock_client.sessions.update = MagicMock()
-
-            result = await service.update_active_tenant_in_session("user_123", "session_123", "tenant_456")
-
-            assert result is True
-            mock_client.sessions.update.assert_called_once()
-            call_args = mock_client.sessions.update.call_args
-            assert call_args[1]["session_id"] == "session_123"
-            assert "active_tenant_id" in call_args[1]["public_metadata"]
-            assert call_args[1]["public_metadata"]["active_tenant_id"] == "tenant_456"
-
-    @pytest.mark.asyncio
-    async def test_update_active_tenant_in_session_fallback(self, clerk_service_with_client):
-        """Test active tenant update with fallback to user metadata"""
-        service, mock_client = clerk_service_with_client
-
-        # Mock get_user_session_metadata to return existing metadata
-        with patch.object(service, 'get_user_session_metadata', new_callable=AsyncMock) as mock_get_meta:
-            mock_get_meta.return_value = {}
-            
-            # Mock session metadata update failure
-            mock_client.sessions.update = MagicMock(side_effect=Exception("Session update failed"))
-            
-            # Mock user metadata update success
-            mock_client.users.update = MagicMock()
-
-            result = await service.update_active_tenant_in_session("user_123", "session_123", "tenant_456")
-
-            assert result is True
-            # Should fall back to users.update when sessions.update fails
-            mock_client.users.update.assert_called_once()
-            call_args = mock_client.users.update.call_args
-            assert call_args[1]["user_id"] == "user_123"
-            assert "active_tenant_id" in call_args[1]["public_metadata"]
-            assert call_args[1]["public_metadata"]["active_tenant_id"] == "tenant_456"
-
+    
+        # Mock user with existing metadata
+        mock_user = MagicMock()
+        mock_user.public_metadata = {"existing": "metadata"}
+        mock_client.users.get.return_value = mock_user
+        
+        # Mock users.update to succeed
+        mock_client.users.update = MagicMock()
+    
+        result = await service.update_active_tenant_in_session("user_123", "tenant_456")
+    
+        assert result is True
+        mock_client.users.update.assert_called_once()
+        call_args = mock_client.users.update.call_args
+        assert call_args[1]["user_id"] == "user_123"
+        assert "active_tenant_id" in call_args[1]["public_metadata"]
+        assert call_args[1]["public_metadata"]["active_tenant_id"] == "tenant_456"
+        assert call_args[1]["public_metadata"]["existing"] == "metadata"  # Preserved
+    
     @pytest.mark.asyncio
     async def test_update_active_tenant_in_session_failure(self, clerk_service_with_client):
-        """Test active tenant update complete failure"""
+        """Test active tenant update failure"""
         service, mock_client = clerk_service_with_client
-
-        # Mock all operations failing
-        mock_client.sessions.update.side_effect = Exception("Session update failed")
-        mock_client.users.update.side_effect = Exception("User update failed")
-
-        result = await service.update_active_tenant_in_session("user_123", "session_123", "tenant_456")
+    
+        # Mock user update failure
+        mock_client.users.get.side_effect = Exception("User not found")
+    
+        result = await service.update_active_tenant_in_session("user_123", "tenant_456")
         assert result is False
 
     @pytest.mark.asyncio
     async def test_get_user_active_tenant_no_client(self, clerk_service):
         """Test getting active tenant when client is not configured"""
         clerk_service.clients.clear()
-
-        result = await clerk_service.get_user_active_tenant("user_123", "session_123")
+    
+        result = await clerk_service.get_user_active_tenant("user_123")
         assert result is None
-
+    
     @pytest.mark.asyncio
-    async def test_get_user_active_tenant_from_session(self, clerk_service_with_client):
-        """Test getting active tenant from session metadata"""
+    async def test_get_user_active_tenant_success(self, clerk_service_with_client):
+        """Test getting active tenant from user metadata"""
         service, mock_client = clerk_service_with_client
-
-        # Mock session metadata with active tenant
-        mock_session = MagicMock()
-        mock_session.public_user_data = MagicMock()
-        mock_session.public_user_data.get.return_value = {
-            "active_tenant_id": "tenant_from_session"
-        }
-        mock_client.sessions.get.return_value = mock_session
-
-        result = await service.get_user_active_tenant("user_123", "session_123")
-
-        assert result == "tenant_from_session"
-        mock_client.sessions.get.assert_called_once_with(session_id="session_123")
-
-    @pytest.mark.asyncio
-    async def test_get_user_active_tenant_fallback_to_user(self, clerk_service_with_client):
-        """Test getting active tenant falling back to user metadata"""
-        service, mock_client = clerk_service_with_client
-
-        # Mock session metadata without active tenant
-        mock_session = MagicMock()
-        mock_session.public_user_data = MagicMock()
-        mock_session.public_user_data.get.return_value = {}
-        mock_client.sessions.get.return_value = mock_session
-
+    
         # Mock user metadata with active tenant
         mock_user = MagicMock()
-        mock_user.public_metadata = {"active_tenant_id": "tenant_from_user"}
+        mock_user.public_metadata = {"active_tenant_id": "tenant_123"}
         mock_client.users.get.return_value = mock_user
-
-        result = await service.get_user_active_tenant("user_123", "session_123")
-
-        assert result == "tenant_from_user"
+    
+        result = await service.get_user_active_tenant("user_123")
+    
+        assert result == "tenant_123"
         mock_client.users.get.assert_called_once_with(user_id="user_123")
-
+    
     @pytest.mark.asyncio
     async def test_get_user_active_tenant_not_found(self, clerk_service_with_client):
         """Test getting active tenant when none exists"""
         service, mock_client = clerk_service_with_client
-
-        # Mock both session and user metadata without active tenant
-        mock_session = MagicMock()
-        mock_session.public_user_data = MagicMock()
-        mock_session.public_user_data.get.return_value = {}
-        mock_client.sessions.get.return_value = mock_session
-
+    
+        # Mock user without active tenant
         mock_user = MagicMock()
         mock_user.public_metadata = {}
         mock_client.users.get.return_value = mock_user
-
-        result = await service.get_user_active_tenant("user_123", "session_123")
+    
+        result = await service.get_user_active_tenant("user_123")
         assert result is None
-
+    
     @pytest.mark.asyncio
     async def test_get_user_active_tenant_failure(self, clerk_service_with_client):
         """Test getting active tenant with error"""
         service, mock_client = clerk_service_with_client
-
-        mock_client.sessions.get.side_effect = Exception("Session access failed")
+    
         mock_client.users.get.side_effect = Exception("User access failed")
-
-        result = await service.get_user_active_tenant("user_123", "session_123")
+    
+        result = await service.get_user_active_tenant("user_123")
         assert result is None
 
     @pytest.mark.asyncio
@@ -457,53 +351,48 @@ class TestClerkService:
         assert result["session_id"] is None
 
     @pytest.mark.asyncio
-    async def test_full_workflow_session_management(self, clerk_service_with_client):
-        """Test complete session management workflow"""
+    async def test_full_workflow_tenant_management(self, clerk_service_with_client):
+        """Test complete user metadata management workflow"""
         service, mock_client = clerk_service_with_client
-
+    
         # Setup mocks
         mock_session = MagicMock()
         mock_session.id = "session_123"
         mock_session.user_id = "user_123"
         mock_session.status = "active"
         mock_client.sessions.verify_session_token.return_value = mock_session
-
-        mock_session_metadata = MagicMock()
-        mock_session_metadata.public_user_data = MagicMock()
-        mock_session_metadata.public_user_data.get.return_value = {}
-        mock_client.sessions.get.return_value = mock_session_metadata
-
+    
+        # Initial user without active tenant
         mock_user = MagicMock()
         mock_user.public_metadata = {}
         mock_client.users.get.return_value = mock_user
-
+    
         # 1. Verify session token
         session_info = await service.verify_session_token("valid-token")
         assert session_info is not None
         assert session_info["user_id"] == "user_123"
-
+    
         # 2. Get current active tenant (should be None initially)
-        active_tenant = await service.get_user_active_tenant("user_123", "session_123")
+        active_tenant = await service.get_user_active_tenant("user_123")
         assert active_tenant is None
-
-        # 3. Update active tenant in session
-        update_success = await service.update_active_tenant_in_session("user_123", "session_123", "tenant_new")
+    
+        # 3. Update active tenant in user metadata
+        update_success = await service.update_active_tenant_in_session("user_123", "tenant_new")
         assert update_success is True
-
+    
         # 4. Get updated active tenant
         # Configure the mock to return the updated tenant info
-        updated_session_metadata = MagicMock()
-        updated_session_metadata.public_user_data = MagicMock()
-        updated_session_metadata.public_user_data.get.return_value = {"active_tenant_id": "tenant_new"}
-        mock_client.sessions.get.return_value = updated_session_metadata
-
-        active_tenant = await service.get_user_active_tenant("user_123", "session_123")
+        updated_user = MagicMock()
+        updated_user.public_metadata = {"active_tenant_id": "tenant_new"}
+        mock_client.users.get.return_value = updated_user
+    
+        active_tenant = await service.get_user_active_tenant("user_123")
         assert active_tenant == "tenant_new"
-
+    
         # Verify the sequence of calls
         assert mock_client.sessions.verify_session_token.called
-        assert mock_client.sessions.get.called
-        assert mock_client.sessions.update.called
+        assert mock_client.users.get.called
+        assert mock_client.users.update.called
 
 
 class TestClerkServiceIntegration:
@@ -514,12 +403,11 @@ class TestClerkServiceIntegration:
         """Test service behavior when Clerk Backend API is not available"""
         with patch('couchdb_jwt_proxy.clerk_service.CLERK_API_AVAILABLE', False):
             service = ClerkService(secret_key="test", issuer_url="https://test.clerk.dev")
-
+    
             # All operations should gracefully return None/False
             assert await service.verify_session_token("token") is None
-            assert await service.get_user_session_metadata("user", "session") is None
-            assert await service.update_active_tenant_in_session("user", "session", "tenant") is False
-            assert await service.get_user_active_tenant("user", "session") is None
+            assert await service.update_active_tenant_in_session("user", "tenant") is False
+            assert await service.get_user_active_tenant("user") is None
             assert await service.update_user_active_tenant("user", "tenant") is False
             assert service.is_configured() is False
 
@@ -527,19 +415,16 @@ class TestClerkServiceIntegration:
     async def test_service_exception_handling(self, clerk_service_with_client):
         """Test service handles exceptions gracefully"""
         service, mock_client = clerk_service_with_client
-
+    
         # Make all client methods raise exceptions
         mock_client.sessions.verify_session_token.side_effect = Exception("Session error")
-        mock_client.sessions.get.side_effect = Exception("Get error")
-        mock_client.sessions.update.side_effect = Exception("Update error")
         mock_client.users.get.side_effect = Exception("User error")
         mock_client.users.update.side_effect = Exception("User update error")
-
+    
         # All operations should handle exceptions gracefully
         assert await service.verify_session_token("token") is None
-        assert await service.get_user_session_metadata("user", "session") is None
-        assert await service.update_active_tenant_in_session("user", "session", "tenant") is False
-        assert await service.get_user_active_tenant("user", "session") is None
+        assert await service.update_active_tenant_in_session("user", "tenant") is False
+        assert await service.get_user_active_tenant("user") is None
         assert await service.update_user_active_tenant("user", "tenant") is False
 
 

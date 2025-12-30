@@ -575,6 +575,28 @@ class CouchDAL:
         
         return response
 
+    async def delete_database(self, db: str) -> Dict[str, Any]:
+        """
+        Delete an entire database (cascade delete for band/tenant).
+        
+        Args:
+            db: Database name to delete
+            
+        Returns:
+            Response with ok status
+            
+        Raises:
+            HTTPException: If operation fails
+        """
+        from fastapi import HTTPException
+        
+        response = await self.get(f"/{db}", "DELETE")
+        
+        if "error" in response:
+            raise HTTPException(status_code=400, detail=response.get("reason", "Database deletion failed"))
+        
+        return response
+
     async def close(self):
         """Close backend resources if needed."""
         if hasattr(self.backend, 'close'):
