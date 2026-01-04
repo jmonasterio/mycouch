@@ -230,9 +230,11 @@ def create_tenant_router(couch_sitter_service, invite_service):
                 raise HTTPException(status_code=400, detail="Invalid role")
 
             # Check tenant access and role
+            logger.info(f"Looking up tenant: {tenant_id}")
             tenant = await couch_sitter_service.get_tenant(tenant_id)
             if not tenant:
-                raise HTTPException(status_code=404, detail="Tenant not found")
+                logger.error(f"Tenant not found: {tenant_id}")
+                raise HTTPException(status_code=404, detail=f"Tenant not found: {tenant_id}")
 
             # Cannot invite to personal tenants
             if tenant.get("metadata", {}).get("autoCreated"):
