@@ -31,8 +31,14 @@ This file provides guidance to Claude Code when working with this repository.
 - All work should be organized into a PRD. The work in the PRD should be a standalone, complete deliverable, when possible.
 - PRD plan should have TESTS first. Plan to write tests before code, especially in in python.
 - Service and UI tests should use a DAL layer to allow testing without corrupting the DB. This is particularly important for mycouch python layer, and less so for javascript which uses index DB. When testing indexDB, we can turn off pouchDB sync.
-- PRD's do not need time estimates. 
+- PRD's do not need time estimates.
 - I appreciate phased plans that can be tested as we go.
+
+## Security Guidelines
+- **NEVER put secrets in beads** (issues.jsonl). Beads are committed to git and will be exposed.
+- **NEVER commit .env files** with real credentials. Only `.env.example` with placeholder values should be committed.
+- Secrets include: API keys, passwords, tokens, private keys, connection strings with credentials.
+- If you need to reference a secret in documentation or beads, use a placeholder like `sk_test_xxx` or `<your-api-key>`.
 
 ## Claude Code Usage Guidelines
 

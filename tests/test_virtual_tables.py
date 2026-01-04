@@ -612,8 +612,11 @@ class TestBootstrapManager:
     @pytest.mark.asyncio
     async def test_bootstrap_user_exists_returns_active_tenant(self, bootstrap_manager, dal):
         """Bootstrap returns existing user's active_tenant_id"""
-        # Create existing user
-        user_id = "user_abc123"
+        # Create existing user with HASHED ID (matches new bootstrap behavior)
+        # sha256("abc123") = 6ca13d52ca70c883e0f0bb101e425a89e8624de51db2d2392593af6a84118090
+        import hashlib
+        sub_hash = hashlib.sha256("abc123".encode()).hexdigest()
+        user_id = f"user_{sub_hash}"
         user_doc = {
             "_id": user_id,
             "type": "user",

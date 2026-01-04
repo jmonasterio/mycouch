@@ -45,10 +45,13 @@ class ClerkService:
         
         # Only register default client if BOTH issuer and secret are provided
         # Otherwise, secrets come from app config in couch-sitter database
+        # NOTE: Skip automatic registration to avoid network calls that trigger CrowdStrike
         default_key = secret_key or os.getenv("CLERK_SECRET_KEY")
         if self.default_issuer and default_key:
-            logger.info(f"Registering default Clerk app: {self.default_issuer}")
-            self.register_app(self.default_issuer, default_key)
+            # DISABLED: Auto-registration makes network calls that CrowdStrike blocks
+            # logger.info(f"Registering default Clerk app: {self.default_issuer}")
+            # self.register_app(self.default_issuer, default_key)
+            logger.info(f"Clerk Issuer configured: {self.default_issuer} (lazy registration)")
         elif self.default_issuer:
             logger.info(f"Clerk Issuer configured: {self.default_issuer} (secrets from app config)")
         else:

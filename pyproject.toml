@@ -12,13 +12,13 @@ authors = [
 dependencies = [
     "fastapi",
     "uvicorn",
-    "pyjwt>=2.4.0",  # Includes PyJWKClient for RS256 validation
-    "cryptography",  # For RSA key handling
+    "pyjwt>=2.4.0", # Includes PyJWKClient for RS256 validation
+    "cryptography", # For RSA key handling
     "httpx",
     "python-dotenv",
     "pydantic",
-    "clerk-backend-api",  # Clerk Backend API for session management
-    "slowapi>=0.1.5",  # Rate limiting library
+    "clerk-backend-api", # Clerk Backend API for session management
+    "slowapi>=0.1.5", # Rate limiting library
 ]
 
 [project.optional-dependencies]

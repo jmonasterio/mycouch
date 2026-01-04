@@ -6,6 +6,7 @@ Creates user and personal tenant on first access; triggers JWT refresh.
 """
 
 import logging
+import hashlib
 from typing import Optional, Dict, Any
 from fastapi import HTTPException
 from datetime import datetime
@@ -20,6 +21,19 @@ class BootstrapManager:
     def __init__(self, dal):
         """Initialize with DAL (data access layer)"""
         self.dal = dal
+
+    @staticmethod
+    def _hash_sub(sub: str) -> str:
+        """
+        Hash the Clerk sub to create a consistent user ID.
+
+        This matches the hashing done in:
+        - virtual_tables.py VirtualTableMapper._hash_sub()
+        - tenant-manager.js hashUserId()
+
+        The hash ensures consistent IDs across frontend and backend.
+        """
+        return hashlib.sha256(sub.encode('utf-8')).hexdigest()
 
     async def check_active_tenant_id(self, payload: Dict[str, Any]) -> Optional[str]:
         """
@@ -51,7 +65,7 @@ class BootstrapManager:
         2. Create personal tenant
         3. Link them together
         4. Return active_tenant_id to set in JWT
-        
+
         Returns dict with:
         - active_tenant_id: tenant ID to set in JWT
         - user_doc: created user document
@@ -59,7 +73,10 @@ class BootstrapManager:
         """
         # Normalize sub to remove user_ prefix if present (Clerk may include it)
         sub_normalized = sub[5:] if sub.startswith("user_") else sub
-        user_id = f"user_{sub_normalized}"
+        # Hash the sub to create consistent user ID that matches frontend hashing
+        sub_hash = self._hash_sub(sub_normalized)
+        user_id = f"user_{sub_hash}"
+        logger.info(f"Bootstrap: sub={sub_normalized[:20]}... -> hash={sub_hash[:16]}... -> user_id={user_id[:30]}...")
         
         # Check if user already exists
         user_doc = None
@@ -80,14 +97,18 @@ class BootstrapManager:
         
         # Create personal tenant
         now = datetime.utcnow().isoformat() + "Z"
-        personal_tenant_id = f"tenant_{sub}_personal"  # Use sub for consistency
-        
+        # Use hashed sub for tenant ID (consistent with user_id format)
+        personal_tenant_id = f"tenant_{sub_hash}_personal"
+
+        # IMPORTANT: userId stores the internal doc ID (user_{hash})
+        # IMPORTANT: userIds stores the Clerk sub for querying (matches POST /__tenants behavior)
+        # This is because virtual_tables queries userIds by JWT sub (requesting_user_id = payload.get("sub"))
         tenant_doc = {
             "_id": personal_tenant_id,
             "type": "tenant",
             "name": f"{email.split('@')[0]}'s Workspace",
-            "userId": user_id,
-            "userIds": [user_id],
+            "userId": sub_normalized,  # Clerk sub (not hashed) - for owner lookup
+            "userIds": [sub_normalized],  # Clerk sub (not hashed) - for membership queries
             "applicationId": "roady",
             "metadata": {
                 "isPersonal": True,
@@ -96,6 +117,7 @@ class BootstrapManager:
             "createdAt": now,
             "updatedAt": now
         }
+        logger.info(f"Bootstrap: Creating tenant {personal_tenant_id} with userIds={tenant_doc['userIds']}")
         
         # Create user document
         user_doc = {
@@ -174,11 +196,13 @@ class BootstrapManager:
         
         if not sub:
             raise HTTPException(status_code=400, detail="Missing 'sub' claim in JWT")
-        
+
         # Normalize sub to remove user_ prefix if present (Clerk may include it)
         sub_normalized = sub[5:] if sub.startswith("user_") else sub
-        user_id = f"user_{sub_normalized}"
-        
+        # Hash the sub to create consistent user ID that matches frontend hashing
+        sub_hash = self._hash_sub(sub_normalized)
+        user_id = f"user_{sub_hash}"
+
         # 3. Check if user exists and has active_tenant_id
         existing_active = await self.get_user_active_tenant(user_id)
         if existing_active:

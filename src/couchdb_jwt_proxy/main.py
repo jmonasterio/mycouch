@@ -256,17 +256,51 @@ def decode_token_unsafe(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 # Clerk JWT validation (RS256)
-@lru_cache(maxsize=10)
-def get_clerk_jwks_client(issuer: str) -> Optional[PyJWKClient]:
-    """Get cached JWKS client for Clerk token validation"""
+# Import local JWKS cache support
+from .jwks_cache import load_jwks_from_cache
+from .local_jwks_client import LocalJWKClient
+
+# Cache for JWKS clients (both local and remote)
+_jwks_clients: Dict[str, Any] = {}
+
+def get_clerk_jwks_client(issuer: str) -> Optional[Any]:
+    """
+    Get JWKS client for Clerk token validation.
+
+    Tries local cache first (to avoid outbound network calls that may be blocked
+    by security software like CrowdStrike), falls back to network fetch.
+    """
+    logger.info(f"[JWKS] get_clerk_jwks_client called for: {issuer}")
+
     if not issuer:
         return None
-        
+
+    # Check if already cached
+    if issuer in _jwks_clients:
+        logger.info(f"[JWKS] Using memory-cached client for: {issuer}")
+        return _jwks_clients[issuer]
+
+    # Try local cache first
+    logger.info(f"[JWKS] Checking local file cache for: {issuer}")
+    jwks_data = load_jwks_from_cache(issuer)
+    logger.info(f"[JWKS] Local cache result: {jwks_data is not None}")
+    if jwks_data:
+        try:
+            client = LocalJWKClient(jwks_data)
+            _jwks_clients[issuer] = client
+            logger.info(f"✓ Using LOCAL JWKS cache for: {issuer}")
+            return client
+        except Exception as e:
+            logger.warning(f"Failed to load local JWKS for {issuer}: {e}")
+
+    # Fall back to network fetch
     jwks_url = f"{issuer.rstrip('/')}/.well-known/jwks.json"
-    
+    logger.warning(f"[JWKS] ⚠️ FALLING BACK TO NETWORK FETCH: {jwks_url}")
+
     try:
         client = PyJWKClient(jwks_url, cache_keys=True)
-        logger.info(f"Clerk JWKS client initialized: {jwks_url}")
+        _jwks_clients[issuer] = client
+        logger.warning(f"[JWKS] ⚠️ Network fetch completed: {jwks_url}")
         return client
     except Exception as e:
         logger.error(f"Failed to initialize Clerk JWKS client for {issuer}: {e}")

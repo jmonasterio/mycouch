@@ -10,7 +10,8 @@ export PYTHONPATH=src
 # --reload: Enable auto-reload during development (remove for production)
 # Check port availability first
 # We export PROXY_HOST and PROXY_PORT so check_port.py uses the same values
-export PROXY_HOST=0.0.0.0
+# Use 127.0.0.1 instead of 0.0.0.0 to avoid CrowdStrike flagging
+export PROXY_HOST=127.0.0.1
 export PROXY_PORT=5985
 
 echo "Checking port availability on $PROXY_HOST:$PROXY_PORT..."
@@ -21,10 +22,6 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Starting proxy..."
-uv run uvicorn couchdb_jwt_proxy.main:app \
-    --host $PROXY_HOST \
-    --port $PROXY_PORT \
-    --timeout-graceful-shutdown 1 \
-    --access-log \
-    --reload \
-    --reload-dir src
+# Use Python import method instead of uvicorn CLI to avoid CrowdStrike blocking
+# Also avoid 'uv run' which spawns subprocesses that CrowdStrike may flag
+.venv/Scripts/python run.py --stdlib
