@@ -68,24 +68,24 @@ class VirtualTableMapper:
 
 
 class VirtualTableAccessControl:
-     """Enforce access control rules for virtual tables.
-     
-     UPGRADE NOTE (Architecture Pattern):
-     All tenant-related methods (can_read_tenant, can_update_tenant, can_delete_tenant) require
-     user_id in INTERNAL format: user_<64-char-sha256-hash>.
-     This is intentional - normalization happens at the CALLER (HTTP endpoint layer in main.py),
-     not in the library method. This keeps the library focused on data access control.
-     
-     If calling from tests or new code:
-     1. Hash the Clerk sub: user_hash = sha256(clerk_sub)
-     2. Add prefix: internal_id = f"user_{user_hash}"
-     3. Pass to method: can_read_tenant(internal_id, tenant_doc)
-     
-     Never add normalization logic back to these methods - it violates single responsibility.
-     """
+    """Enforce access control rules for virtual tables.
+    
+    UPGRADE NOTE (Architecture Pattern):
+    All tenant-related methods (can_read_tenant, can_update_tenant, can_delete_tenant) require
+    user_id in INTERNAL format: user_<64-char-sha256-hash>.
+    This is intentional - normalization happens at the CALLER (HTTP endpoint layer in main.py),
+    not in the library method. This keeps the library focused on data access control.
+    
+    If calling from tests or new code:
+    1. Hash the Clerk sub: user_hash = sha256(clerk_sub)
+    2. Add prefix: internal_id = f"user_{user_hash}"
+    3. Pass to method: can_read_tenant(internal_id, tenant_doc)
+    
+    Never add normalization logic back to these methods - it violates single responsibility.
+    """
 
-     @staticmethod
-     def _hash_user_id(sub: str) -> str:
+    @staticmethod
+    def _hash_user_id(sub: str) -> str:
         """Hash a Clerk sub to get the virtual user ID (hashed format)"""
         return VirtualTableMapper._hash_sub(sub)
 

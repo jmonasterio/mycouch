@@ -1213,7 +1213,12 @@ class CouchSitterService:
 
             # Add creator as owner to user.tenants[] array
             # This is necessary because get_user_role_for_tenant() reads from user.tenants[]
-            await self.add_user_to_tenant(tenant_id, user_id, "owner")
+            try:
+                await self.add_user_to_tenant(tenant_id, user_id, "owner")
+            except Exception as e:
+                logger.error(f"WARNING: Failed to add user {user_id} as owner to tenant {tenant_id}: {e}")
+                # Don't fail tenant creation if role assignment fails
+                # The tenant was created successfully, but user role info might be incomplete
 
             return tenant_doc
 
