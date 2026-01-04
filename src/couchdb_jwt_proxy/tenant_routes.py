@@ -223,13 +223,10 @@ def create_tenant_router(couch_sitter_service, invite_service):
         """
         try:
             user_id = current_user.get("user_id")
-            email = request_data.get("email")
+            email = request_data.get("email", "")  # Email is optional
             role = request_data.get("role", "member")
 
-            if not email:
-                raise HTTPException(status_code=400, detail="Email is required")
-
-            if role not in ["member", "admin"]:
+            if role not in ["member", "admin", "editor", "viewer"]:
                 raise HTTPException(status_code=400, detail="Invalid role")
 
             # Check tenant access and role
