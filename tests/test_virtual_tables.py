@@ -180,19 +180,20 @@ class TestVirtualTableAccessControl:
 
     def test_user_can_read_tenant_if_member(self):
         """User can read tenant if in userIds"""
-        # Normalize function converts Clerk subs to internal format
+        # Caller responsibility: normalize Clerk subs to internal format before calling
         user1_hash = _hash_sub("user1")
         user2_hash = _hash_sub("user2")
+        user3_hash = _hash_sub("user3")
         
         tenant_doc = {
             "_id": "tenant_123",
             "userIds": [f"user_{user1_hash}", f"user_{user2_hash}"],
             "userId": f"user_{user1_hash}"
         }
-        # Pass Clerk subs, _normalize_user_id converts them internally
-        assert VirtualTableAccessControl.can_read_tenant("user1", tenant_doc) is True
-        assert VirtualTableAccessControl.can_read_tenant("user2", tenant_doc) is True
-        assert VirtualTableAccessControl.can_read_tenant("user3", tenant_doc) is False
+        # Pass internal format (user_<hash>)
+        assert VirtualTableAccessControl.can_read_tenant(f"user_{user1_hash}", tenant_doc) is True
+        assert VirtualTableAccessControl.can_read_tenant(f"user_{user2_hash}", tenant_doc) is True
+        assert VirtualTableAccessControl.can_read_tenant(f"user_{user3_hash}", tenant_doc) is False
 
     def test_user_can_update_tenant_if_owner(self):
         """Only owner can update tenant"""
@@ -449,16 +450,18 @@ class TestVirtualTableHandlerTenantCRUD:
     @pytest.mark.asyncio
     async def test_create_tenant(self, virtual_table_handler):
         """User becomes owner when creating tenant"""
+        # Caller responsibility: normalize Clerk sub to internal format before calling
+        user_hash = _hash_sub("user_abc123")
+        internal_user_id = f"user_{user_hash}"
+        
         result = await virtual_table_handler.create_tenant(
-            "user_abc123",
+            internal_user_id,  # Pass internal format
             {"name": "My Team"}
         )
         assert result["name"] == "My Team"
-        # userId should be internal format (user_<hash>)
-        user_hash = _hash_sub("user_abc123")
-        expected_user_id = f"user_{user_hash}"
-        assert result["userId"] == expected_user_id
-        assert expected_user_id in result["userIds"]
+        # userId should be in internal format (user_<hash>)
+        assert result["userId"] == internal_user_id
+        assert internal_user_id in result["userIds"]
 
     @pytest.mark.asyncio
     async def test_get_tenant_as_member(self, virtual_table_handler, dal):
@@ -477,8 +480,8 @@ class TestVirtualTableHandlerTenantCRUD:
         }
         await dal.put_document("couch-sitter", tenant_id, tenant_doc)
 
-        # Pass Clerk sub "user_member" - it will be converted to internal format for comparison
-        result = await virtual_table_handler.get_tenant("team123", "user_member")
+        # Caller responsibility: pass internal format to get_tenant
+        result = await virtual_table_handler.get_tenant("team123", f"user_{member_hash}")
         assert result["name"] == "Team"
 
     @pytest.mark.asyncio
@@ -536,8 +539,8 @@ class TestVirtualTableHandlerTenantCRUD:
         raw_results = await dal.query_documents("couch-sitter", query)
         print(f"DEBUG: Raw query returned {len(raw_results.get('docs', []))} docs")
 
-        # List tenants for user_member (pass Clerk sub, gets converted internally)
-        results = await virtual_table_handler.list_tenants("user_member")
+        # List tenants for user_member (caller responsibility: pass internal format)
+        results = await virtual_table_handler.list_tenants(f"user_{member_hash}")
         assert len(results) == 1
         # Virtual table handler converts internal IDs to virtual format (removes prefix)
         assert results[0]["_id"] == "team1"

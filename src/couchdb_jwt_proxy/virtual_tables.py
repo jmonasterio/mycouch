@@ -68,10 +68,24 @@ class VirtualTableMapper:
 
 
 class VirtualTableAccessControl:
-    """Enforce access control rules for virtual tables"""
+     """Enforce access control rules for virtual tables.
+     
+     UPGRADE NOTE (Architecture Pattern):
+     All tenant-related methods (can_read_tenant, can_update_tenant, can_delete_tenant) require
+     user_id in INTERNAL format: user_<64-char-sha256-hash>.
+     This is intentional - normalization happens at the CALLER (HTTP endpoint layer in main.py),
+     not in the library method. This keeps the library focused on data access control.
+     
+     If calling from tests or new code:
+     1. Hash the Clerk sub: user_hash = sha256(clerk_sub)
+     2. Add prefix: internal_id = f"user_{user_hash}"
+     3. Pass to method: can_read_tenant(internal_id, tenant_doc)
+     
+     Never add normalization logic back to these methods - it violates single responsibility.
+     """
 
-    @staticmethod
-    def _hash_user_id(sub: str) -> str:
+     @staticmethod
+     def _hash_user_id(sub: str) -> str:
         """Hash a Clerk sub to get the virtual user ID (hashed format)"""
         return VirtualTableMapper._hash_sub(sub)
 
@@ -106,7 +120,10 @@ class VirtualTableAccessControl:
 
     @staticmethod
     def can_read_tenant(user_id: str, tenant_doc: Dict[str, Any]) -> bool:
-        """User can read if they're in tenant.userIds (user_id must be in internal format)"""
+        """User can read if they're in tenant.userIds.
+        CALLER RESPONSIBILITY: user_id MUST be in internal format (user_<64-char-sha256-hash>).
+        Caller must normalize Clerk subs before calling this method.
+        """
         if not tenant_doc:
             return False
         user_ids = tenant_doc.get("userIds", [])
@@ -481,8 +498,11 @@ class VirtualTableHandler:
     async def list_tenants(self, user_id: str) -> List[Dict[str, Any]]:
         """
         GET /__tenants
-        Returns all tenants user is member of (user_id must be in internal format).
-        Converts internal IDs to virtual format for API response.
+        Returns all tenants user is member of. Converts internal IDs to virtual format for API response.
+        
+        CALLER RESPONSIBILITY: user_id MUST be in internal format (user_<64-char-sha256-hash>).
+        Normalization from Clerk sub happens at the HTTP endpoint layer (main.py).
+        See VirtualTableAccessControl class docstring for upgrade notes.
         """
         # Query all tenant docs for this user (exclude soft-deleted documents)
         # Filter out docs where either deletedAt or deleted fields are set (for both new and legacy formats)
@@ -522,6 +542,10 @@ class VirtualTableHandler:
         POST /__tenants
         Create new tenant; user becomes owner.
         Returns virtual ID (without "tenant_" prefix) for use in subsequent requests.
+        
+        CALLER RESPONSIBILITY: requesting_user_id MUST be in internal format (user_<64-char-sha256-hash>).
+        Normalization from Clerk sub happens at the HTTP endpoint layer (main.py).
+        See VirtualTableAccessControl class docstring for upgrade notes.
         """
         # Generate tenant ID
         tenant_id = str(uuid.uuid4())

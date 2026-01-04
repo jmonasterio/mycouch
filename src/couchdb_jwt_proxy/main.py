@@ -1009,29 +1009,29 @@ app.state.limiter = limiter
 # ========== REGISTER TENANT/INVITATION API ROUTES EARLY ==========
 # These MUST be registered BEFORE the catch-all route to ensure proper matching
 print("=" * 80, flush=True)
-print("📌 [EARLY ROUTER REGISTRATION] STARTING ROUTER REGISTRATION", flush=True)
+print("[EARLY ROUTER REGISTRATION] STARTING ROUTER REGISTRATION", flush=True)
 print(f"   couch_sitter_service: {couch_sitter_service}", flush=True)
 print(f"   invite_service: {invite_service}", flush=True)
 print("=" * 80, flush=True)
 
-logger.info("📌 [EARLY ROUTER REGISTRATION] Creating tenant router...")
+logger.info("[EARLY ROUTER REGISTRATION] Creating tenant router...")
 try:
-    print("📌 [EARLY ROUTER REGISTRATION] About to call create_tenant_router", flush=True)
+    print("[EARLY ROUTER REGISTRATION] About to call create_tenant_router", flush=True)
     tenant_router = create_tenant_router(couch_sitter_service, invite_service)
-    print(f"📌 [EARLY ROUTER REGISTRATION] Tenant router created successfully", flush=True)
-    logger.info(f"📌 [EARLY ROUTER REGISTRATION] Tenant router has {len(tenant_router.routes)} routes:")
+    print(f"[EARLY ROUTER REGISTRATION] Tenant router created successfully", flush=True)
+    logger.info(f"[EARLY ROUTER REGISTRATION] Tenant router has {len(tenant_router.routes)} routes:")
     for route in tenant_router.routes:
         print(f"   - {route.path} ({route.methods})", flush=True)
         logger.info(f"   - {route.path} ({route.methods})")
     app.include_router(tenant_router)
-    print("✓ [EARLY ROUTER REGISTRATION] Router included successfully", flush=True)
-    logger.info("✓ [EARLY ROUTER REGISTRATION] Tenant and invitation routes registered successfully")
+    print("[EARLY ROUTER REGISTRATION] Router included successfully", flush=True)
+    logger.info("[EARLY ROUTER REGISTRATION] Tenant and invitation routes registered successfully")
 except Exception as e:
-    print(f"❌ [EARLY ROUTER REGISTRATION] EXCEPTION: {e}", flush=True)
+    print(f"[EARLY ROUTER REGISTRATION] EXCEPTION: {e}", flush=True)
     print(f"   Type: {type(e)}", flush=True)
     import traceback
     traceback.print_exc()
-    logger.error(f"❌ [EARLY ROUTER REGISTRATION] Failed to register tenant router: {e}", exc_info=True)
+    logger.error(f"[EARLY ROUTER REGISTRATION] Failed to register tenant router: {e}", exc_info=True)
     raise
 
 # Startup event to ensure log database exists
