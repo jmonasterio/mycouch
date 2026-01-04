@@ -756,6 +756,26 @@ class TestVirtualTableBulkDocs:
 class TestExtractTenantBootstrapIntegration:
     """Test extract_tenant() function with 5-level discovery chain"""
 
+    def _create_mock_tenant_service(self):
+        """Create a mock TenantService that returns predictable results."""
+        import uuid
+        mock_service = MagicMock()
+        tenant_id = str(uuid.uuid4())
+
+        # Mock query_user_tenants to return empty (triggers Level 4)
+        mock_service.query_user_tenants = AsyncMock(return_value=[])
+
+        # Mock create_tenant to return success
+        mock_service.create_tenant = AsyncMock(return_value={
+            "tenant_id": tenant_id,
+            "doc": {"_id": f"tenant_{tenant_id}", "owner_id": "user_hash"}
+        })
+
+        # Mock set_user_default_tenant
+        mock_service.set_user_default_tenant = AsyncMock(return_value={"active_tenant_id": tenant_id})
+
+        return mock_service, tenant_id
+
     @pytest.mark.asyncio
     async def test_extract_tenant_roady_creates_tenant_for_new_user(self, dal):
         """extract_tenant creates new tenant via 5-level discovery for roady app"""
@@ -768,9 +788,21 @@ class TestExtractTenantBootstrapIntegration:
             "iss": "https://test.clerk.accounts.dev"
         }
 
-        # Mock APPLICATIONS to recognize roady app
+        mock_service, expected_tenant = self._create_mock_tenant_service()
+
+        # Mock APPLICATIONS and TenantService to work without real CouchDB
         with patch('couchdb_jwt_proxy.main.APPLICATIONS',
-                   {"https://test.clerk.accounts.dev": {"databaseNames": ["roady"]}}):
+                   {"https://test.clerk.accounts.dev": {"databaseNames": ["roady"]}}), \
+             patch('couchdb_jwt_proxy.main.TenantService', return_value=mock_service), \
+             patch('couchdb_jwt_proxy.main.session_service') as mock_session:
+
+            mock_session.get_active_tenant = AsyncMock(return_value=None)
+            mock_session.create_session = AsyncMock()
+
+            # Clear any cached tenant service
+            if hasattr(extract_tenant, '_tenant_service'):
+                delattr(extract_tenant, '_tenant_service')
+
             tenant_id = await extract_tenant(payload, "roady/docs")
             # 5-level discovery creates a new tenant (UUID format)
             assert tenant_id is not None
@@ -789,9 +821,21 @@ class TestExtractTenantBootstrapIntegration:
             "iss": "https://test.clerk.accounts.dev"
         }
 
-        # Mock APPLICATIONS
+        mock_service, expected_tenant = self._create_mock_tenant_service()
+
+        # Mock APPLICATIONS and TenantService to work without real CouchDB
         with patch('couchdb_jwt_proxy.main.APPLICATIONS',
-                   {"https://test.clerk.accounts.dev": {"databaseNames": ["roady"]}}):
+                   {"https://test.clerk.accounts.dev": {"databaseNames": ["roady"]}}), \
+             patch('couchdb_jwt_proxy.main.TenantService', return_value=mock_service), \
+             patch('couchdb_jwt_proxy.main.session_service') as mock_session:
+
+            mock_session.get_active_tenant = AsyncMock(return_value=None)
+            mock_session.create_session = AsyncMock()
+
+            # Clear any cached tenant service
+            if hasattr(extract_tenant, '_tenant_service'):
+                delattr(extract_tenant, '_tenant_service')
+
             # 5-level discovery should create a new tenant (Level 4)
             tenant_id = await extract_tenant(payload, "roady/docs")
             assert tenant_id is not None
