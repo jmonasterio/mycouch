@@ -120,6 +120,73 @@ class CouchDBProxyHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
+    def handle_api_tenants(self, method: str) -> bool:
+        """Handle /api/tenants backend endpoints. Returns True if handled."""
+        path = self.path.split("?")[0]
+        origin = self.get_cors_origin()
+
+        if not path.startswith("/api/tenants"):
+            return False
+
+        # Verify JWT
+        payload, error = self.verify_authorization()
+        if error:
+            logger.warning(f"API tenant auth failed: {error}")
+            self.send_error_response(401, error, origin)
+            return True
+
+        user_id = payload.get("sub")
+        if not user_id:
+            self.send_error_response(400, "Missing 'sub' in JWT", origin)
+            return True
+
+        body_data = self.read_json_body() if method in ("POST", "PUT") else {}
+
+        try:
+            # POST /api/tenants - Create tenant
+            if path == "/api/tenants" and method == "POST":
+                status, result = handle_create_tenant(user_id, body_data)
+                self.send_json_response(status, result, origin)
+                return True
+            
+            # GET /api/tenants - List tenants (would go to /api/my-tenants in FastAPI, but handle here too)
+            if path == "/api/tenants" and method == "GET":
+                status, result = handle_list_tenants(user_id)
+                self.send_json_response(status, result, origin)
+                return True
+
+            # GET /api/tenants/<id> - Get specific tenant
+            tenant_match = re.match(r'^/api/tenants/([^/]+)$', path)
+            if tenant_match:
+                tenant_id = tenant_match.group(1)
+                if method == "GET":
+                    status, result = handle_get_tenant(tenant_id, user_id)
+                elif method == "PUT":
+                    status, result = handle_update_tenant(tenant_id, user_id, body_data)
+                elif method == "DELETE":
+                    active = payload.get("active_tenant_id")
+                    status, result = handle_delete_tenant(tenant_id, user_id, active)
+                else:
+                    self.send_error_response(405, f"Method {method} not allowed", origin)
+                    return True
+                self.send_json_response(status, result, origin)
+                return True
+
+            # POST /api/tenants/{id}/invitations - Create invitation (not yet implemented in stdlib)
+            inv_create_match = re.match(r'^/api/tenants/([^/]+)/invitations$', path)
+            if inv_create_match and method == "POST":
+                logger.warning(f"POST /api/tenants/*/invitations not yet implemented in stdlib server")
+                self.send_error_response(501, "Invitation endpoints not yet implemented in stdlib mode. Use FastAPI mode instead.", origin)
+                return True
+
+            self.send_error_response(404, f"API endpoint not found: {path}", origin)
+            return True
+
+        except Exception as e:
+            logger.error(f"API tenant error: {e}")
+            self.send_error_response(500, f"Internal error: {e}", origin)
+            return True
+
     def handle_virtual_tables(self, method: str) -> bool:
         """Handle virtual table endpoints. Returns True if handled."""
         path = self.path.split("?")[0]
@@ -233,20 +300,24 @@ class CouchDBProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_GET(self):
-        if not self.handle_virtual_tables("GET"):
-            self.proxy_to_couchdb("GET")
+        if not self.handle_api_tenants("GET"):
+            if not self.handle_virtual_tables("GET"):
+                self.proxy_to_couchdb("GET")
 
     def do_POST(self):
-        if not self.handle_virtual_tables("POST"):
-            self.proxy_to_couchdb("POST")
+        if not self.handle_api_tenants("POST"):
+            if not self.handle_virtual_tables("POST"):
+                self.proxy_to_couchdb("POST")
 
     def do_PUT(self):
-        if not self.handle_virtual_tables("PUT"):
-            self.proxy_to_couchdb("PUT")
+        if not self.handle_api_tenants("PUT"):
+            if not self.handle_virtual_tables("PUT"):
+                self.proxy_to_couchdb("PUT")
 
     def do_DELETE(self):
-        if not self.handle_virtual_tables("DELETE"):
-            self.proxy_to_couchdb("DELETE")
+        if not self.handle_api_tenants("DELETE"):
+            if not self.handle_virtual_tables("DELETE"):
+                self.proxy_to_couchdb("DELETE")
 
 
 class ThreadedHTTPServer(HTTPServer):

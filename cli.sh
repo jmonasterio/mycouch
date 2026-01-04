@@ -24,4 +24,5 @@ fi
 echo "Starting proxy..."
 # Use Python import method instead of uvicorn CLI to avoid CrowdStrike blocking
 # Also avoid 'uv run' which spawns subprocesses that CrowdStrike may flag
-.venv/Scripts/python run.py --stdlib
+.venv/Scripts/python run.py 
+#--stdlib

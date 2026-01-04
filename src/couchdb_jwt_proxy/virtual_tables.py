@@ -106,7 +106,7 @@ class VirtualTableAccessControl:
 
     @staticmethod
     def can_read_tenant(user_id: str, tenant_doc: Dict[str, Any]) -> bool:
-        """User can read if they're in tenant.userIds"""
+        """User can read if they're in tenant.userIds (user_id must be in internal format)"""
         if not tenant_doc:
             return False
         user_ids = tenant_doc.get("userIds", [])
@@ -478,10 +478,10 @@ class VirtualTableHandler:
         
         return doc
 
-    async def list_tenants(self, requesting_user_id: str) -> List[Dict[str, Any]]:
+    async def list_tenants(self, user_id: str) -> List[Dict[str, Any]]:
         """
         GET /__tenants
-        Returns all tenants user is member of.
+        Returns all tenants user is member of (user_id must be in internal format).
         Converts internal IDs to virtual format for API response.
         """
         # Query all tenant docs for this user (exclude soft-deleted documents)
@@ -489,7 +489,7 @@ class VirtualTableHandler:
         query = {
             "selector": {
                 "type": "tenant",
-                "userIds": {"$elemMatch": {"$eq": requesting_user_id}},
+                "userIds": {"$elemMatch": {"$eq": user_id}},
                 "$and": [
                     {"deletedAt": {"$exists": False}},
                     {"deleted": {"$ne": True}}
@@ -530,6 +530,7 @@ class VirtualTableHandler:
         # Create tenant doc
         now = datetime.utcnow().isoformat() + "Z"
         logger.info(f"[VIRTUAL] Creating tenant with owner: {requesting_user_id}")
+        
         tenant_doc = {
             "_id": internal_id,
             "type": "tenant",

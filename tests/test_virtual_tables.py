@@ -180,11 +180,16 @@ class TestVirtualTableAccessControl:
 
     def test_user_can_read_tenant_if_member(self):
         """User can read tenant if in userIds"""
+        # Normalize function converts Clerk subs to internal format
+        user1_hash = _hash_sub("user1")
+        user2_hash = _hash_sub("user2")
+        
         tenant_doc = {
             "_id": "tenant_123",
-            "userIds": ["user1", "user2"],
-            "userId": "user1"
+            "userIds": [f"user_{user1_hash}", f"user_{user2_hash}"],
+            "userId": f"user_{user1_hash}"
         }
+        # Pass Clerk subs, _normalize_user_id converts them internally
         assert VirtualTableAccessControl.can_read_tenant("user1", tenant_doc) is True
         assert VirtualTableAccessControl.can_read_tenant("user2", tenant_doc) is True
         assert VirtualTableAccessControl.can_read_tenant("user3", tenant_doc) is False
@@ -449,22 +454,30 @@ class TestVirtualTableHandlerTenantCRUD:
             {"name": "My Team"}
         )
         assert result["name"] == "My Team"
-        assert result["userId"] == "user_abc123"
-        assert "user_abc123" in result["userIds"]
+        # userId should be internal format (user_<hash>)
+        user_hash = _hash_sub("user_abc123")
+        expected_user_id = f"user_{user_hash}"
+        assert result["userId"] == expected_user_id
+        assert expected_user_id in result["userIds"]
 
     @pytest.mark.asyncio
     async def test_get_tenant_as_member(self, virtual_table_handler, dal):
         """User can read tenant if member"""
         tenant_id = "tenant_team123"
+        # Use internal format for userId/userIds
+        owner_hash = _hash_sub("user_owner")
+        member_hash = _hash_sub("user_member")
+        
         tenant_doc = {
             "_id": tenant_id,
             "type": "tenant",
             "name": "Team",
-            "userId": "user_owner",
-            "userIds": ["user_owner", "user_member"]
+            "userId": f"user_{owner_hash}",
+            "userIds": [f"user_{owner_hash}", f"user_{member_hash}"]
         }
         await dal.put_document("couch-sitter", tenant_id, tenant_doc)
 
+        # Pass Clerk sub "user_member" - it will be converted to internal format for comparison
         result = await virtual_table_handler.get_tenant("team123", "user_member")
         assert result["name"] == "Team"
 
@@ -474,12 +487,15 @@ class TestVirtualTableHandlerTenantCRUD:
         from fastapi import HTTPException
 
         tenant_id = "tenant_team123"
+        # Use internal format for userId/userIds
+        owner_hash = _hash_sub("user_owner")
+        
         tenant_doc = {
             "_id": tenant_id,
             "type": "tenant",
             "name": "Team",
-            "userId": "user_owner",
-            "userIds": ["user_owner"]
+            "userId": f"user_{owner_hash}",
+            "userIds": [f"user_{owner_hash}"]
         }
         await dal.put_document("couch-sitter", tenant_id, tenant_doc)
 
@@ -490,20 +506,23 @@ class TestVirtualTableHandlerTenantCRUD:
     @pytest.mark.asyncio
     async def test_list_tenants_filtered_to_member(self, virtual_table_handler, dal):
         """List tenants returns only user's tenants"""
-        # Create multiple tenants
+        # Create multiple tenants using internal format
+        member_hash = _hash_sub("user_member")
+        owner_hash = _hash_sub("user_owner")
+        
         tenant1 = {
             "_id": "tenant_team1",
             "type": "tenant",
             "name": "Team 1",
-            "userId": "user_member",
-            "userIds": ["user_member"]
+            "userId": f"user_{member_hash}",
+            "userIds": [f"user_{member_hash}"]
         }
         tenant2 = {
             "_id": "tenant_team2",
             "type": "tenant",
             "name": "Team 2",
-            "userId": "user_owner",
-            "userIds": ["user_owner"]
+            "userId": f"user_{owner_hash}",
+            "userIds": [f"user_{owner_hash}"]
         }
         await dal.put_document("couch-sitter", "tenant_team1", tenant1)
         await dal.put_document("couch-sitter", "tenant_team2", tenant2)
@@ -517,7 +536,7 @@ class TestVirtualTableHandlerTenantCRUD:
         raw_results = await dal.query_documents("couch-sitter", query)
         print(f"DEBUG: Raw query returned {len(raw_results.get('docs', []))} docs")
 
-        # List tenants for user_member
+        # List tenants for user_member (pass Clerk sub, gets converted internally)
         results = await virtual_table_handler.list_tenants("user_member")
         assert len(results) == 1
         # Virtual table handler converts internal IDs to virtual format (removes prefix)
@@ -529,12 +548,16 @@ class TestVirtualTableHandlerTenantCRUD:
         from fastapi import HTTPException
 
         tenant_id = "tenant_team123"
+        # Use internal format
+        owner_hash = _hash_sub("user_owner")
+        member_hash = _hash_sub("user_member")
+        
         tenant_doc = {
             "_id": tenant_id,
             "type": "tenant",
             "name": "Team",
-            "userId": "user_owner",
-            "userIds": ["user_owner", "user_member"]
+            "userId": f"user_{owner_hash}",
+            "userIds": [f"user_{owner_hash}", f"user_{member_hash}"]
         }
         await dal.put_document("couch-sitter", tenant_id, tenant_doc)
 
@@ -553,12 +576,16 @@ class TestVirtualTableHandlerTenantCRUD:
         from fastapi import HTTPException
 
         tenant_id = "tenant_team123"
+        # Use internal format
+        owner_hash = _hash_sub("user_owner")
+        member_hash = _hash_sub("user_member")
+        
         tenant_doc = {
             "_id": tenant_id,
             "type": "tenant",
             "name": "Team",
-            "userId": "user_owner",
-            "userIds": ["user_owner", "user_member"]
+            "userId": f"user_{owner_hash}",
+            "userIds": [f"user_{owner_hash}", f"user_{member_hash}"]
         }
         await dal.put_document("couch-sitter", tenant_id, tenant_doc)
 

@@ -1211,6 +1211,10 @@ class CouchSitterService:
             else:
                 logger.error(f"CRITICAL: Skipping tenantIds update - user {user_id} not found in database")
 
+            # Add creator as owner to user.tenants[] array
+            # This is necessary because get_user_role_for_tenant() reads from user.tenants[]
+            await self.add_user_to_tenant(tenant_id, user_id, "owner")
+
             return tenant_doc
 
         except httpx.HTTPStatusError as e:

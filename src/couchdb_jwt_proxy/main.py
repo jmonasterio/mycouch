@@ -9,6 +9,12 @@ from typing import Optional, Dict, Any, List
 from functools import lru_cache
 from jwt import PyJWKClient
 
+
+def _normalize_clerk_sub_to_user_id(sub: str) -> str:
+    """Convert Clerk sub claim to internal user ID format (user_<hash>)"""
+    sub_hash = hashlib.sha256(sub.encode('utf-8')).hexdigest()
+    return f"user_{sub_hash}"
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header, Request, Body
 from fastapi.responses import Response, StreamingResponse
@@ -1000,6 +1006,34 @@ app = FastAPI(
 # Add rate limiter to app state for middleware
 app.state.limiter = limiter
 
+# ========== REGISTER TENANT/INVITATION API ROUTES EARLY ==========
+# These MUST be registered BEFORE the catch-all route to ensure proper matching
+print("=" * 80, flush=True)
+print("📌 [EARLY ROUTER REGISTRATION] STARTING ROUTER REGISTRATION", flush=True)
+print(f"   couch_sitter_service: {couch_sitter_service}", flush=True)
+print(f"   invite_service: {invite_service}", flush=True)
+print("=" * 80, flush=True)
+
+logger.info("📌 [EARLY ROUTER REGISTRATION] Creating tenant router...")
+try:
+    print("📌 [EARLY ROUTER REGISTRATION] About to call create_tenant_router", flush=True)
+    tenant_router = create_tenant_router(couch_sitter_service, invite_service)
+    print(f"📌 [EARLY ROUTER REGISTRATION] Tenant router created successfully", flush=True)
+    logger.info(f"📌 [EARLY ROUTER REGISTRATION] Tenant router has {len(tenant_router.routes)} routes:")
+    for route in tenant_router.routes:
+        print(f"   - {route.path} ({route.methods})", flush=True)
+        logger.info(f"   - {route.path} ({route.methods})")
+    app.include_router(tenant_router)
+    print("✓ [EARLY ROUTER REGISTRATION] Router included successfully", flush=True)
+    logger.info("✓ [EARLY ROUTER REGISTRATION] Tenant and invitation routes registered successfully")
+except Exception as e:
+    print(f"❌ [EARLY ROUTER REGISTRATION] EXCEPTION: {e}", flush=True)
+    print(f"   Type: {type(e)}", flush=True)
+    import traceback
+    traceback.print_exc()
+    logger.error(f"❌ [EARLY ROUTER REGISTRATION] Failed to register tenant router: {e}", exc_info=True)
+    raise
+
 # Startup event to ensure log database exists
 @app.on_event("startup")
 async def startup_event():
@@ -1624,11 +1658,13 @@ async def list_tenants(authorization: Optional[str] = Header(None)):
     if not payload:
         raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
     
-    requesting_user_id = payload.get("sub")
-    if not requesting_user_id:
+    sub = payload.get("sub")
+    if not sub:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
-    return await virtual_table_handler.list_tenants(requesting_user_id)
+    # Normalize to internal user ID format
+    user_id = _normalize_clerk_sub_to_user_id(sub)
+    return await virtual_table_handler.list_tenants(user_id)
 
 @app.post("/__tenants")
 async def create_tenant(request: Request, authorization: Optional[str] = Header(None)):
@@ -1641,13 +1677,15 @@ async def create_tenant(request: Request, authorization: Optional[str] = Header(
     if not payload:
         raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
     
-    requesting_user_id = payload.get("sub")
-    if not requesting_user_id:
+    sub = payload.get("sub")
+    if not sub:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
-    logger.info(f"[ROUTE] POST /__tenants: requesting_user_id={requesting_user_id}")
+    # Normalize to internal user ID format
+    user_id = _normalize_clerk_sub_to_user_id(sub)
+    logger.info(f"[ROUTE] POST /__tenants: user_id={user_id}")
     body = await request.json()
-    result = await virtual_table_handler.create_tenant(requesting_user_id, body)
+    result = await virtual_table_handler.create_tenant(user_id, body)
     return result
 
 @app.put("/__tenants/{tenant_id}")
@@ -1661,13 +1699,15 @@ async def update_tenant(tenant_id: str, request: Request, authorization: Optiona
     if not payload:
         raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
     
-    requesting_user_id = payload.get("sub")
-    if not requesting_user_id:
+    sub = payload.get("sub")
+    if not sub:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
-    logger.info(f"[ROUTE] PUT /__tenants/{tenant_id}: requesting_user_id={requesting_user_id}")
+    # Normalize to internal user ID format
+    user_id = _normalize_clerk_sub_to_user_id(sub)
+    logger.info(f"[ROUTE] PUT /__tenants/{tenant_id}: user_id={user_id}")
     body = await request.json()
-    return await virtual_table_handler.update_tenant(tenant_id, requesting_user_id, body)
+    return await virtual_table_handler.update_tenant(tenant_id, user_id, body)
 
 @app.delete("/__tenants/{tenant_id}")
 async def delete_tenant(tenant_id: str, authorization: Optional[str] = Header(None)):
@@ -1680,14 +1720,17 @@ async def delete_tenant(tenant_id: str, authorization: Optional[str] = Header(No
     if not payload:
         raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
     
-    requesting_user_id = payload.get("sub")
-    if not requesting_user_id:
+    sub = payload.get("sub")
+    if not sub:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
+    
+    # Normalize to internal user ID format
+    user_id = _normalize_clerk_sub_to_user_id(sub)
     
     # Get user's active_tenant_id for validation
     active_tenant_id = payload.get("active_tenant_id")
     
-    return await virtual_table_handler.delete_tenant(tenant_id, requesting_user_id, active_tenant_id or "")
+    return await virtual_table_handler.delete_tenant(tenant_id, user_id, active_tenant_id or "")
 
 @app.get("/__users/_changes")
 async def user_changes(
@@ -1824,11 +1867,6 @@ async def tenant_bulk_docs(request: Request, authorization: Optional[str] = Head
 
 logger.info("✓ Registered virtual table routes (__users, __tenants, _changes, _bulk_docs)")
 
-# Add Tenant Management Routes (BEFORE catch-all to ensure /api/* routes match first)
-tenant_router = create_tenant_router(couch_sitter_service, invite_service)
-app.include_router(tenant_router)
-logger.info("✓ Registered tenant and invitation management routes")
-
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "COPY", "PATCH", "OPTIONS"])
 async def proxy_couchdb(
     request: Request,
@@ -1838,6 +1876,12 @@ async def proxy_couchdb(
     """Proxy requests to CouchDB with JWT validation and tenant enforcement"""
 
     logger.debug(f"Incoming request: {request.method} /{path}")
+
+    # CRITICAL: Block /api/* from reaching catch-all (should be handled by included routers)
+    if path.startswith("api/"):
+        logger.error(f"❌ /api/ path reached catch-all: {request.method} /{path}")
+        logger.error(f"   This means tenant/invitation API routes are not being registered properly")
+        raise HTTPException(status_code=500, detail="API route not registered")
 
     # NOTE: Virtual table routes (/__users/*, /__tenants/*, etc.) are handled by explicit @app.get() routes above.
     # If they reach here, something went wrong with route matching.
