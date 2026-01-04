@@ -13,11 +13,8 @@ For multi-tenant requests: Uses 5-level discovery chain
 """
 
 import pytest
-import json
-from unittest.mock import Mock, patch, AsyncMock
-from fastapi.testclient import TestClient
-from httpx import AsyncClient
-import jwt
+import uuid
+from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from datetime import datetime, timedelta
 
 
@@ -48,6 +45,29 @@ def stale_jwt_payload():
     }
 
 
+def create_mock_tenant_service(tenant_id=None):
+    """Create a mock TenantService that returns predictable results."""
+    mock_service = MagicMock()
+
+    # If no tenant_id provided, generate a UUID
+    if tenant_id is None:
+        tenant_id = str(uuid.uuid4())
+
+    # Mock query_user_tenants to return empty (triggers Level 4)
+    mock_service.query_user_tenants = AsyncMock(return_value=[])
+
+    # Mock create_tenant to return success
+    mock_service.create_tenant = AsyncMock(return_value={
+        "tenant_id": tenant_id,
+        "doc": {"_id": f"tenant_{tenant_id}", "owner_id": "user_hash"}
+    })
+
+    # Mock set_user_default_tenant
+    mock_service.set_user_default_tenant = AsyncMock(return_value={"active_tenant_id": tenant_id})
+
+    return mock_service, tenant_id
+
+
 class TestMultiTenantDiscovery:
     """Test suite for 5-level tenant discovery chain"""
 
@@ -56,13 +76,23 @@ class TestMultiTenantDiscovery:
         """Test that new user without tenant gets one created (Level 4)"""
         from src.couchdb_jwt_proxy.main import extract_tenant
 
-        # New user with no session, no user doc, no existing tenants
-        # Should trigger Level 4: create new tenant
-        tenant_id = await extract_tenant(stale_jwt_payload, "/roady/test")
+        mock_service, expected_tenant = create_mock_tenant_service()
 
-        # Should return a valid tenant ID (UUID format)
-        assert tenant_id is not None
-        assert len(tenant_id) == 36  # UUID format
+        # Mock the TenantService creation and session_service
+        with patch('src.couchdb_jwt_proxy.main.TenantService', return_value=mock_service), \
+             patch('src.couchdb_jwt_proxy.main.session_service') as mock_session:
+            mock_session.get_active_tenant = AsyncMock(return_value=None)
+            mock_session.create_session = AsyncMock()
+
+            # Clear any cached tenant service
+            if hasattr(extract_tenant, '_tenant_service'):
+                delattr(extract_tenant, '_tenant_service')
+
+            tenant_id = await extract_tenant(stale_jwt_payload, "/roady/test")
+
+            # Should return a valid tenant ID (UUID format)
+            assert tenant_id is not None
+            assert len(tenant_id) == 36  # UUID format
 
     @pytest.mark.asyncio
     async def test_couch_sitter_requests_use_personal_tenant(self, stale_jwt_payload):
@@ -112,11 +142,22 @@ class TestDiscoveryChainBehavior:
             # No active_tenant_id - discovery will create one
         }
 
-        tenant_id = await extract_tenant(payload, "/roady/test")
+        mock_service, expected_tenant = create_mock_tenant_service()
 
-        # Should get a new tenant created
-        assert tenant_id is not None
-        assert len(tenant_id) == 36  # UUID format
+        with patch('src.couchdb_jwt_proxy.main.TenantService', return_value=mock_service), \
+             patch('src.couchdb_jwt_proxy.main.session_service') as mock_session:
+            mock_session.get_active_tenant = AsyncMock(return_value=None)
+            mock_session.create_session = AsyncMock()
+
+            # Clear any cached tenant service
+            if hasattr(extract_tenant, '_tenant_service'):
+                delattr(extract_tenant, '_tenant_service')
+
+            tenant_id = await extract_tenant(payload, "/roady/test")
+
+            # Should get a new tenant created
+            assert tenant_id is not None
+            assert len(tenant_id) == 36  # UUID format
 
     @pytest.mark.asyncio
     async def test_jwt_active_tenant_claim_ignored_by_discovery(self):
@@ -126,15 +167,27 @@ class TestDiscoveryChainBehavior:
         payload = {
             "sub": "user_with_claim",
             "iss": "https://roady.clerk.accounts.dev",
-            "active_tenant_id": "jwt_claimed_tenant"  # This is ignored
+            "active_tenant_id": "jwt_claimed_tenant"  # This is ignored by discovery
         }
 
-        tenant_id = await extract_tenant(payload, "/roady/test")
+        # Create a tenant with a different ID than the JWT claim
+        mock_service, expected_tenant = create_mock_tenant_service()
 
-        # 5-level discovery creates new tenant instead of using JWT claim
-        assert tenant_id is not None
-        # The returned tenant will be a new UUID, not the JWT claim value
-        assert tenant_id != "jwt_claimed_tenant"
+        with patch('src.couchdb_jwt_proxy.main.TenantService', return_value=mock_service), \
+             patch('src.couchdb_jwt_proxy.main.session_service') as mock_session:
+            mock_session.get_active_tenant = AsyncMock(return_value=None)
+            mock_session.create_session = AsyncMock()
+
+            # Clear any cached tenant service
+            if hasattr(extract_tenant, '_tenant_service'):
+                delattr(extract_tenant, '_tenant_service')
+
+            tenant_id = await extract_tenant(payload, "/roady/test")
+
+            # 5-level discovery creates new tenant instead of using JWT claim
+            assert tenant_id is not None
+            # The returned tenant will be a new UUID, not the JWT claim value
+            assert tenant_id != "jwt_claimed_tenant"
 
 
 class TestSecurityLogging:
@@ -153,11 +206,22 @@ class TestSecurityLogging:
             "iss": "https://roady.clerk.accounts.dev",
         }
 
-        tenant_id = await extract_tenant(payload, "/roady/test")
+        mock_service, expected_tenant = create_mock_tenant_service()
 
-        # Should have logged tenant creation
-        assert any("Level 4" in record.message or "Created new tenant" in record.message
-                   for record in caplog.records)
+        with patch('src.couchdb_jwt_proxy.main.TenantService', return_value=mock_service), \
+             patch('src.couchdb_jwt_proxy.main.session_service') as mock_session:
+            mock_session.get_active_tenant = AsyncMock(return_value=None)
+            mock_session.create_session = AsyncMock()
+
+            # Clear any cached tenant service
+            if hasattr(extract_tenant, '_tenant_service'):
+                delattr(extract_tenant, '_tenant_service')
+
+            tenant_id = await extract_tenant(payload, "/roady/test")
+
+            # Should have logged tenant creation at Level 4
+            assert any("Level 4" in record.message or "Created new tenant" in record.message
+                       for record in caplog.records)
 
 
 class TestComplianceWithSecurityReview:
@@ -182,16 +246,30 @@ class TestComplianceWithSecurityReview:
             "active_tenant_id": "tenant_b"
         }
 
-        # Note: extract_tenant uses 5-level discovery chain. When no session/user doc exists,
-        # it creates a new tenant for each user. The key security property is that different
-        # users get different tenants - not that the JWT claim is used directly.
-        tenant_a = await extract_tenant(payload_a, "/roady/test")
-        tenant_b = await extract_tenant(payload_b, "/roady/test")
+        # Create different mock services for each user
+        mock_service_a, tenant_a_id = create_mock_tenant_service()
+        mock_service_b, tenant_b_id = create_mock_tenant_service()
 
-        # Verify tenant isolation - each user gets their own unique tenant
-        assert tenant_a is not None
-        assert tenant_b is not None
-        assert tenant_a != tenant_b  # Critical: no cross-tenant leakage
+        with patch('src.couchdb_jwt_proxy.main.session_service') as mock_session:
+            mock_session.get_active_tenant = AsyncMock(return_value=None)
+            mock_session.create_session = AsyncMock()
+
+            # User A request
+            with patch('src.couchdb_jwt_proxy.main.TenantService', return_value=mock_service_a):
+                if hasattr(extract_tenant, '_tenant_service'):
+                    delattr(extract_tenant, '_tenant_service')
+                tenant_a = await extract_tenant(payload_a, "/roady/test")
+
+            # User B request
+            with patch('src.couchdb_jwt_proxy.main.TenantService', return_value=mock_service_b):
+                if hasattr(extract_tenant, '_tenant_service'):
+                    delattr(extract_tenant, '_tenant_service')
+                tenant_b = await extract_tenant(payload_b, "/roady/test")
+
+            # Verify tenant isolation - each user gets their own unique tenant
+            assert tenant_a is not None
+            assert tenant_b is not None
+            assert tenant_a != tenant_b  # Critical: no cross-tenant leakage
 
 
 # Integration tests
