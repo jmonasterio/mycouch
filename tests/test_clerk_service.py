@@ -37,8 +37,12 @@ def clerk_service(mock_config):
          patch('couchdb_jwt_proxy.clerk_service.Clerk') as mock_clerk:
 
         mock_getenv.side_effect = lambda key, default=None: mock_config.get(key, default)
-        mock_clerk.return_value = MagicMock()  # Mock Clerk client to avoid slow initialization
+        mock_client = MagicMock()
+        mock_clerk.return_value = mock_client
         service = ClerkService()
+        # Auto-registration is disabled in ClerkService to avoid network calls,
+        # so we manually add the client for testing
+        service.clients["https://test-clerk.clerk.accounts.dev"] = mock_client
         return service
 
 

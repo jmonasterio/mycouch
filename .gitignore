@@ -62,3 +62,5 @@ htmlcov/
 *.tmp
 *.log
 *.pid
+couchdb_data/*
+couchdb_data/shards/00000000-7fffffff/roady.1767079694.couch

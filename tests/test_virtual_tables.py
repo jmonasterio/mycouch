@@ -754,31 +754,33 @@ class TestVirtualTableBulkDocs:
 # ============================================================================
 
 class TestExtractTenantBootstrapIntegration:
-    """Test extract_tenant() function with bootstrap integration"""
+    """Test extract_tenant() function with 5-level discovery chain"""
 
     @pytest.mark.asyncio
-    async def test_extract_tenant_roady_with_active_tenant_in_jwt(self, dal):
-        """extract_tenant returns active_tenant_id from JWT for roady app"""
+    async def test_extract_tenant_roady_creates_tenant_for_new_user(self, dal):
+        """extract_tenant creates new tenant via 5-level discovery for roady app"""
         from couchdb_jwt_proxy.main import extract_tenant
-        
+
         payload = {
             "sub": "user123",
             "email": "user@example.com",
-            "active_tenant_id": "tenant_personal",
+            "active_tenant_id": "tenant_personal",  # Note: this is ignored by 5-level discovery
             "iss": "https://test.clerk.accounts.dev"
         }
-        
+
         # Mock APPLICATIONS to recognize roady app
-        with patch('couchdb_jwt_proxy.main.APPLICATIONS', 
+        with patch('couchdb_jwt_proxy.main.APPLICATIONS',
                    {"https://test.clerk.accounts.dev": {"databaseNames": ["roady"]}}):
             tenant_id = await extract_tenant(payload, "roady/docs")
-            assert tenant_id == "tenant_personal"
+            # 5-level discovery creates a new tenant (UUID format)
+            assert tenant_id is not None
+            # Tenant ID should be UUID-like (36 chars with dashes)
+            assert len(tenant_id) == 36
 
     @pytest.mark.asyncio
-    async def test_extract_tenant_roady_missing_active_tenant_rejects(self, dal):
-        """extract_tenant rejects roady request without active_tenant_id (CWE-287 security fix)"""
+    async def test_extract_tenant_roady_creates_tenant_when_missing_active_tenant(self, dal):
+        """extract_tenant creates tenant via 5-level discovery even without active_tenant_id"""
         from couchdb_jwt_proxy.main import extract_tenant
-        from fastapi import HTTPException
 
         payload = {
             "sub": "newuser123",
@@ -786,17 +788,15 @@ class TestExtractTenantBootstrapIntegration:
             "name": "New User",
             "iss": "https://test.clerk.accounts.dev"
         }
-        
+
         # Mock APPLICATIONS
         with patch('couchdb_jwt_proxy.main.APPLICATIONS',
                    {"https://test.clerk.accounts.dev": {"databaseNames": ["roady"]}}):
-            
-            # Should raise HTTPException - no bootstrap fallback
-            with pytest.raises(HTTPException) as exc_info:
-                await extract_tenant(payload, "roady/docs")
-            
-            # Verify it's a 401 error
-            assert exc_info.value.status_code == 401
+            # 5-level discovery should create a new tenant (Level 4)
+            tenant_id = await extract_tenant(payload, "roady/docs")
+            assert tenant_id is not None
+            # Should be a UUID
+            assert len(tenant_id) == 36
 
     @pytest.mark.asyncio
     async def test_extract_tenant_couch_sitter_ignores_bootstrap(self, dal):

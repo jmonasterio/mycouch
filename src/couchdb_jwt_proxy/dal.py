@@ -326,8 +326,12 @@ class MemoryBackend(BaseBackend):
                 if len(condition) == 1:
                     continue
             
-            # For non-$exists conditions, key must exist in doc
+            # For most conditions, key must exist in doc
+            # Exception: $ne operator - if field doesn't exist, $ne matches (like CouchDB)
             if key not in doc:
+                # $ne on missing field should pass (the field is not equal to the value)
+                if isinstance(condition, dict) and "$ne" in condition:
+                    continue  # Field doesn't exist, so it's not equal to the value
                 return False
 
             doc_value = doc[key]

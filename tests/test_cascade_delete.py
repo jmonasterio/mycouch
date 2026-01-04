@@ -67,9 +67,9 @@ class TestCascadeDelete:
         assert result["ok"] is True
         assert result["_id"] == internal_id
         
-        # Verify tenant was soft-deleted in couch-sitter
+        # Verify tenant was soft-deleted in couch-sitter (uses deletedAt field)
         deleted_tenant = await dal.get_document("couch-sitter", internal_id)
-        assert deleted_tenant.get("deleted") is True
+        assert deleted_tenant.get("deletedAt") is not None
         assert deleted_tenant.get("updatedAt") is not None
         
         # Verify delete_database was called with roady
@@ -107,9 +107,9 @@ class TestCascadeDelete:
         assert "warnings" in result
         assert any("roady" in w for w in result["warnings"])
         
-        # Verify tenant was still deleted
+        # Verify tenant was still deleted (uses deletedAt field)
         deleted_tenant = await dal.get_document("couch-sitter", internal_id)
-        assert deleted_tenant.get("deleted") is True
+        assert deleted_tenant.get("deletedAt") is not None
     
     @pytest.mark.asyncio
     async def test_cascade_delete_tenant_deletion_failure_fails_completely(self, virtual_table_handler, dal):
