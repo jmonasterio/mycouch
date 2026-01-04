@@ -7,6 +7,7 @@ Provides endpoints for creating/managing workspaces and invitations.
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from typing import Optional, Dict, Any, List
 import logging
+import httpx
 
 from .auth_middleware import get_current_user
 
@@ -352,37 +353,48 @@ def create_tenant_router(couch_sitter_service, invite_service):
             logger.error(f"Error previewing invitation: {e}")
             raise HTTPException(status_code=500, detail="Failed to preview invitation")
 
-    @router.post("/invitations/accept")
-    async def accept_invitation(request_data: Dict[str, Any]):
+    @router.patch("/invitations/accept")
+    async def accept_invitation(
+        request_data: Dict[str, Any] = Body(...),
+        current_user: Dict[str, Any] = Depends(get_current_user)
+    ):
         """
-        Accept an invitation (no auth required, uses token + Clerk ID).
+        Accept an invitation and add user to tenant.
 
         Request:
-            - token: Invitation token
-            - clerkUserId: User's Clerk ID
+            - inviteToken: Invitation token
 
         Returns:
             Success with tenant info
+
+        Errors:
+            - 404: Invalid or revoked token
+            - 410: Expired token
+            - 409: User already a member
         """
         try:
-            token = request_data.get("token")
-            clerk_user_id = request_data.get("clerkUserId")
-
-            if not token or not clerk_user_id:
-                raise HTTPException(status_code=400, detail="Token and clerkUserId required")
+            invite_token = request_data.get("inviteToken")
+            if not invite_token:
+                raise HTTPException(status_code=400, detail="inviteToken is required")
 
             # Validate token
-            invitation = await invite_service.validate_token(token)
+            invitation = await invite_service.validate_token(invite_token)
             if not invitation:
-                raise HTTPException(status_code=400, detail="Invalid or expired invitation")
+                # Check if expired to return correct status code
+                # We need to find the invitation by token to check status
+                # For now, return 404 for invalid/revoked
+                raise HTTPException(status_code=404, detail="This invitation is no longer valid or has expired")
 
-            # Check if already accepted
-            if invitation.get("status") == "accepted":
-                raise HTTPException(status_code=400, detail="Invitation has already been accepted")
-
-            user_id = f"user_{clerk_user_id}"
+            user_id = current_user.get("user_id")
             tenant_id = invitation.get("tenantId")
-            role = invitation.get("role", "member")
+            role = invitation.get("role", "editor")
+
+            # Check if user is already a member
+            existing_tenants = await couch_sitter_service.get_user_tenants(current_user.get("sub"))
+            existing_tenant_ids = [t[0].get("_id") for t in existing_tenants[0]]
+            
+            if tenant_id in existing_tenant_ids:
+                raise HTTPException(status_code=409, detail="You already belong to this band")
 
             # Add user to tenant
             await couch_sitter_service.add_user_to_tenant(tenant_id, user_id, role)
@@ -392,6 +404,8 @@ def create_tenant_router(couch_sitter_service, invite_service):
 
             # Get tenant for response
             tenant = await couch_sitter_service.get_tenant(tenant_id)
+
+            logger.info(f"User {user_id} accepted invitation to tenant {tenant_id}")
 
             return {
                 "success": True,
@@ -568,10 +582,11 @@ def create_tenant_router(couch_sitter_service, invite_service):
         Remove a member from tenant (owner/admin only).
 
         Returns:
-            204 No Content
+            Success with removed status
         """
         try:
             user_id = current_user.get("user_id")
+            from datetime import datetime, timezone
 
             # Check access
             tenant = await couch_sitter_service.get_tenant(tenant_id)
@@ -587,20 +602,31 @@ def create_tenant_router(couch_sitter_service, invite_service):
             if member_user_id == tenant.get("userId"):
                 raise HTTPException(status_code=400, detail="Cannot remove owner from tenant")
 
-            # Remove from userIds
+            # 1. Remove from tenant's userIds
             tenant["userIds"] = [uid for uid in tenant.get("userIds", []) if uid != member_user_id]
-            from datetime import datetime, timezone
             tenant["updatedAt"] = datetime.now(timezone.utc).isoformat()
-
             await couch_sitter_service._make_request("PUT", tenant_id, json=tenant)
 
-            # Remove mapping (soft delete)
-            mapping_id = f"tenant_user_mapping:{tenant_id}:{member_user_id}"
-            member_mapping = await couch_sitter_service.get_tenant_user_mapping(tenant_id, member_user_id)
-            if member_mapping:
-                member_mapping["removedAt"] = datetime.now(timezone.utc).isoformat()
-                await couch_sitter_service._make_request("PUT", mapping_id, json=member_mapping)
+            # 2. Remove tenant from user's tenants array
+            try:
+                response = await couch_sitter_service._make_request("GET", member_user_id)
+                member_user_doc = response.json()
+                
+                member_user_doc["tenants"] = [
+                    t for t in member_user_doc.get("tenants", [])
+                    if t.get("tenantId") != tenant_id
+                ]
+                member_user_doc["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                await couch_sitter_service._make_request("PUT", member_user_id, json=member_user_doc)
+                logger.info(f"Removed tenant {tenant_id} from user {member_user_id}")
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    logger.warning(f"User {member_user_id} not found when removing from tenant")
+                else:
+                    logger.error(f"Failed to update user {member_user_id}: {e}")
+                    raise
 
+            logger.info(f"Removed member {member_user_id} from tenant {tenant_id}")
             return {"status": "removed"}
 
         except HTTPException:

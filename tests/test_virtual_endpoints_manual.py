@@ -185,6 +185,7 @@ def sub_hash(jwt_token):
 
 
 # Tests: User Endpoints
+@pytest.mark.integration
 class TestUserEndpoints:
     """Test __users virtual table endpoints"""
     
@@ -250,6 +251,7 @@ class TestUserEndpoints:
 
 
 # Tests: Tenant Endpoints
+@pytest.mark.integration
 class TestTenantEndpoints:
     """Test __tenants virtual table endpoints"""
     
@@ -337,6 +339,7 @@ class TestTenantEndpoints:
 
 
 # Tests: Error Cases
+@pytest.mark.integration
 class TestErrorCases:
     """Test error handling"""
     
