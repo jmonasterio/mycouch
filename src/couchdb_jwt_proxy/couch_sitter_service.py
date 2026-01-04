@@ -1218,35 +1218,38 @@ class CouchSitterService:
             raise
 
     async def get_tenant(self, tenant_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get a tenant document by ID.
-        
-        Deleted tenants (with deletedAt field) are treated as not found.
+         """
+         Get a tenant document by ID.
+         
+         Deleted tenants (with deletedAt field) are treated as not found.
 
-        Args:
-            tenant_id: Tenant ID
+         Args:
+             tenant_id: Virtual tenant ID (UUID without prefix) or internal ID (tenant_<UUID>)
 
-        Returns:
-            Tenant document if found and not deleted, None otherwise
-        """
-        try:
-            response = await self._make_request("GET", tenant_id)
-            response.raise_for_status()
-            doc = response.json()
-            
-            # Treat deleted tenants as not found
-            if doc.get("deletedAt"):
-                logger.debug(f"Tenant is deleted: {tenant_id}")
-                return None
-            
-            logger.debug(f"Found tenant: {tenant_id}")
-            return doc
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.debug(f"Tenant not found: {tenant_id}")
-                return None
-            logger.error(f"Error fetching tenant {tenant_id}: {e}")
-            raise
+         Returns:
+             Tenant document if found and not deleted, None otherwise
+         """
+         try:
+             # Convert virtual ID to internal format if needed
+             internal_id = tenant_id if tenant_id.startswith('tenant_') else f'tenant_{tenant_id}'
+             
+             response = await self._make_request("GET", internal_id)
+             response.raise_for_status()
+             doc = response.json()
+             
+             # Treat deleted tenants as not found
+             if doc.get("deletedAt"):
+                 logger.debug(f"Tenant is deleted: {tenant_id}")
+                 return None
+             
+             logger.debug(f"Found tenant: {tenant_id}")
+             return doc
+         except httpx.HTTPStatusError as e:
+             if e.response.status_code == 404:
+                 logger.debug(f"Tenant not found: {tenant_id}")
+                 return None
+             logger.error(f"Error fetching tenant {tenant_id}: {e}")
+             raise
 
     async def add_user_to_tenant(
         self,
