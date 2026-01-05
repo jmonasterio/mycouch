@@ -99,6 +99,7 @@ class BootstrapManager:
         now = datetime.utcnow().isoformat() + "Z"
         # Use hashed sub for tenant ID (consistent with user_id format)
         personal_tenant_id = f"tenant_{sub_hash}_personal"
+        personal_tenant_id_virtual = f"{sub_hash}_personal"  # Virtual format (no prefix)
 
         # IMPORTANT: userId stores the internal doc ID (user_{hash})
         # IMPORTANT: userIds stores the Clerk sub for querying (matches POST /__tenants behavior)
@@ -136,7 +137,7 @@ class BootstrapManager:
                     "joinedAt": now
                 }
             ],
-            "active_tenant_id": personal_tenant_id,
+            "active_tenant_id": personal_tenant_id_virtual,
             "createdAt": now,
             "updatedAt": now
         }
@@ -156,7 +157,7 @@ class BootstrapManager:
             logger.info(f"Bootstrapped user {user_id} with personal tenant {personal_tenant_id}")
             
             return {
-                "active_tenant_id": personal_tenant_id,
+                "active_tenant_id": personal_tenant_id_virtual,
                 "user_doc": user_doc,
                 "tenant_doc": tenant_doc,
                 "bootstrapped": True

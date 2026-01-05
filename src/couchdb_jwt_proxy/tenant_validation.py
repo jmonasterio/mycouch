@@ -11,6 +11,8 @@ import logging
 from typing import Dict, List, Any, Optional
 from fastapi import HTTPException
 import json
+import re
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,90 @@ logger = logging.getLogger(__name__)
 class TenantAccessError(Exception):
     """Raised when document access violates tenant ownership"""
     pass
+
+
+class TenantIdFormatError(Exception):
+    """Raised when tenant ID format is invalid"""
+    pass
+
+
+class UserIdFormatError(Exception):
+    """Raised when user ID format is invalid"""
+    pass
+
+
+def validate_user_id_format(user_id: str) -> None:
+    """
+    Validate that user ID matches the required format: user_<64-char-sha256-hash>
+    
+    Args:
+        user_id: User ID to validate
+        
+    Raises:
+        UserIdFormatError: If format is invalid
+    """
+    if not user_id:
+        raise UserIdFormatError("User ID cannot be empty")
+    
+    # Must start with "user_"
+    if not user_id.startswith("user_"):
+        raise UserIdFormatError(
+            f"User ID must start with 'user_', got: {user_id}"
+        )
+    
+    # Extract the hash part after "user_"
+    hash_part = user_id[5:]  # Skip "user_" prefix
+    
+    if not hash_part:
+        raise UserIdFormatError("User ID must include a hash after 'user_'")
+    
+    # Validate that hash is exactly 64 characters (SHA256 hex)
+    if len(hash_part) != 64:
+        raise UserIdFormatError(
+            f"User ID hash must be 64 characters (SHA256 hex), got {len(hash_part)}: {hash_part}"
+        )
+    
+    # Validate that hash contains only valid hex characters
+    try:
+        int(hash_part, 16)
+    except ValueError:
+        raise UserIdFormatError(
+            f"User ID hash must be valid hexadecimal, got: {hash_part}"
+        )
+
+
+def validate_tenant_id_format(tenant_id: str) -> None:
+    """
+    Validate that tenant ID matches the required format: tenant_{uuid}
+    
+    Args:
+        tenant_id: Tenant ID to validate
+        
+    Raises:
+        TenantIdFormatError: If format is invalid
+    """
+    if not tenant_id:
+        raise TenantIdFormatError("Tenant ID cannot be empty")
+    
+    # Must start with "tenant_"
+    if not tenant_id.startswith("tenant_"):
+        raise TenantIdFormatError(
+            f"Tenant ID must start with 'tenant_', got: {tenant_id}"
+        )
+    
+    # Extract the UUID part after "tenant_"
+    uuid_part = tenant_id[7:]  # Skip "tenant_" prefix
+    
+    if not uuid_part:
+        raise TenantIdFormatError("Tenant ID must include a UUID after 'tenant_'")
+    
+    # Validate that the UUID part is a valid UUID
+    try:
+        UUID(uuid_part)
+    except ValueError:
+        raise TenantIdFormatError(
+            f"Tenant ID must have format 'tenant_{{uuid}}', got invalid UUID: {uuid_part}"
+        )
 
 
 class TenantValidator:

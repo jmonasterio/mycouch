@@ -142,41 +142,41 @@ class TestVirtualTableAccessControl:
     def test_user_can_read_own_doc(self):
         """User can read their own document"""
         user1_hash = _hash_sub("user1")
-        assert VirtualTableAccessControl.can_read_user("user1", user1_hash) is True
+        assert VirtualTableAccessControl.can_read_user("user1", f"user_{user1_hash}") is True
 
     def test_user_cannot_read_other_doc(self):
         """User cannot read another user's document"""
         user2_hash = _hash_sub("user2")
-        assert VirtualTableAccessControl.can_read_user("user1", user2_hash) is False
+        assert VirtualTableAccessControl.can_read_user("user1", f"user_{user2_hash}") is False
 
     def test_user_can_update_allowed_field(self):
         """User can update allowed fields in their own doc"""
         user1_hash = _hash_sub("user1")
-        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "name") is True
-        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "email") is True
-        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "active_tenant_id") is True
+        assert VirtualTableAccessControl.can_update_user("user1", f"user_{user1_hash}", "name") is True
+        assert VirtualTableAccessControl.can_update_user("user1", f"user_{user1_hash}", "email") is True
+        assert VirtualTableAccessControl.can_update_user("user1", f"user_{user1_hash}", "active_tenant_id") is True
 
     def test_user_cannot_update_immutable_field(self):
         """User cannot update immutable fields"""
         user1_hash = _hash_sub("user1")
-        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "sub") is False
-        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "type") is False
-        assert VirtualTableAccessControl.can_update_user("user1", user1_hash, "_id") is False
+        assert VirtualTableAccessControl.can_update_user("user1", f"user_{user1_hash}", "sub") is False
+        assert VirtualTableAccessControl.can_update_user("user1", f"user_{user1_hash}", "type") is False
+        assert VirtualTableAccessControl.can_update_user("user1", f"user_{user1_hash}", "_id") is False
 
     def test_user_cannot_update_other_user(self):
         """User cannot update another user's document"""
         user2_hash = _hash_sub("user2")
-        assert VirtualTableAccessControl.can_update_user("user1", user2_hash, "name") is False
+        assert VirtualTableAccessControl.can_update_user("user1", f"user_{user2_hash}", "name") is False
 
     def test_user_cannot_delete_self(self):
         """User cannot delete themselves"""
         user1_hash = _hash_sub("user1")
-        assert VirtualTableAccessControl.can_delete_user("user1", user1_hash) is False
+        assert VirtualTableAccessControl.can_delete_user("user1", f"user_{user1_hash}") is False
 
     def test_user_can_delete_other(self):
         """Admin can delete another user (delete doesn't check ownership)"""
         user1_hash = _hash_sub("user1")
-        assert VirtualTableAccessControl.can_delete_user("admin", user1_hash) is True
+        assert VirtualTableAccessControl.can_delete_user("admin", f"user_{user1_hash}") is True
 
     def test_user_can_read_tenant_if_member(self):
         """User can read tenant if in userIds"""

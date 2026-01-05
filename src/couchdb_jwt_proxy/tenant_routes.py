@@ -10,6 +10,7 @@ import logging
 import httpx
 
 from .auth_middleware import get_current_user
+from .tenant_validation import validate_tenant_id_format, TenantIdFormatError
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +71,13 @@ def create_tenant_router(couch_sitter_service, invite_service):
                 application_id=app_id
             )
 
+            # Extract virtual ID from internal ID (remove tenant_ prefix)
+            internal_id = tenant.get("_id")
+            virtual_id = internal_id[7:] if internal_id.startswith("tenant_") else internal_id
+
             return {
-                "tenantId": tenant.get("_id"),
-                "_id": tenant.get("_id"),
+                "tenantId": virtual_id,
+                "_id": virtual_id,
                 "type": tenant.get("type"),
                 "name": tenant.get("name"),
                 "applicationId": tenant.get("applicationId"),
@@ -131,6 +136,12 @@ def create_tenant_router(couch_sitter_service, invite_service):
             Updated tenant
         """
         try:
+            # Validate tenant ID format
+            try:
+                validate_tenant_id_format(tenant_id)
+            except TenantIdFormatError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
             user_id = current_user.get("user_id")
 
             # Get tenant and check ownership
@@ -175,6 +186,12 @@ def create_tenant_router(couch_sitter_service, invite_service):
             204 No Content
         """
         try:
+            # Validate tenant ID format
+            try:
+                validate_tenant_id_format(tenant_id)
+            except TenantIdFormatError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
             user_id = current_user.get("user_id")
 
             # Get tenant
@@ -222,6 +239,12 @@ def create_tenant_router(couch_sitter_service, invite_service):
             Invitation with token and invite link
         """
         try:
+            # Validate tenant ID format
+            try:
+                validate_tenant_id_format(tenant_id)
+            except TenantIdFormatError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
             user_id = current_user.get("user_id")
             email = request_data.get("email", "")  # Email is optional
             role = request_data.get("role", "member")
@@ -289,6 +312,12 @@ def create_tenant_router(couch_sitter_service, invite_service):
             List of invitations
         """
         try:
+            # Validate tenant ID format
+            try:
+                validate_tenant_id_format(tenant_id)
+            except TenantIdFormatError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
             user_id = current_user.get("user_id")
 
             # Check access
@@ -438,6 +467,12 @@ def create_tenant_router(couch_sitter_service, invite_service):
             204 No Content
         """
         try:
+            # Validate tenant ID format
+            try:
+                validate_tenant_id_format(tenant_id)
+            except TenantIdFormatError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
             user_id = current_user.get("user_id")
 
             # Check access
@@ -531,6 +566,12 @@ def create_tenant_router(couch_sitter_service, invite_service):
             Updated mapping
         """
         try:
+            # Validate tenant ID format
+            try:
+                validate_tenant_id_format(tenant_id)
+            except TenantIdFormatError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
             user_id = current_user.get("user_id")
             new_role = request_data.get("role")
 
@@ -590,6 +631,12 @@ def create_tenant_router(couch_sitter_service, invite_service):
             Success with removed status
         """
         try:
+            # Validate tenant ID format
+            try:
+                validate_tenant_id_format(tenant_id)
+            except TenantIdFormatError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            
             user_id = current_user.get("user_id")
             from datetime import datetime, timezone
 

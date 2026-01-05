@@ -93,17 +93,21 @@ class VirtualTableAccessControl:
     def can_read_user(user_id: str, target_user_id: str) -> bool:
         """User can only read their own doc"""
         # user_id is Clerk sub (e.g., user_34tzJwWB3jaQT6ZKPqZIQoJwsmz)
-        # target_user_id is hashed ID from URL (e.g., a3f7c2d...)
+        # target_user_id is internal format from URL (e.g., user_a3f7c2d...)
         user_hash = VirtualTableAccessControl._hash_user_id(user_id)
-        return user_hash == target_user_id
+        # Extract virtual ID from internal format (strip user_ prefix if present)
+        target_virtual_id = target_user_id[5:] if target_user_id.startswith('user_') else target_user_id
+        return user_hash == target_virtual_id
 
     @staticmethod
     def can_update_user(user_id: str, target_user_id: str, field: str) -> bool:
         """User can update allowed fields in their own doc"""
         # user_id is Clerk sub (e.g., user_34tzJwWB3jaQT6ZKPqZIQoJwsmz)
-        # target_user_id is hashed ID from URL (e.g., a3f7c2d...)
+        # target_user_id is internal format from URL (e.g., user_a3f7c2d...)
         user_hash = VirtualTableAccessControl._hash_user_id(user_id)
-        if user_hash != target_user_id:
+        # Extract virtual ID from internal format (strip user_ prefix if present)
+        target_virtual_id = target_user_id[5:] if target_user_id.startswith('user_') else target_user_id
+        if user_hash != target_virtual_id:
             return False
         
         allowed_fields = {"name", "email", "active_tenant_id"}
@@ -113,10 +117,12 @@ class VirtualTableAccessControl:
     def can_delete_user(user_id: str, target_user_id: str) -> bool:
         """User cannot delete themselves"""
         # user_id is Clerk sub (e.g., user_34tzJwWB3jaQT6ZKPqZIQoJwsmz)
-        # target_user_id is hashed ID from URL (e.g., a3f7c2d...)
+        # target_user_id is internal format from URL (e.g., user_a3f7c2d...)
         user_hash = VirtualTableAccessControl._hash_user_id(user_id)
+        # Extract virtual ID from internal format (strip user_ prefix if present)
+        target_virtual_id = target_user_id[5:] if target_user_id.startswith('user_') else target_user_id
         # Return False if trying to delete self, True otherwise
-        return user_hash != target_user_id
+        return user_hash != target_virtual_id
 
     @staticmethod
     def can_read_tenant(user_id: str, tenant_doc: Dict[str, Any]) -> bool:
@@ -362,13 +368,21 @@ class VirtualTableHandler:
         # Map virtual to internal ID
         internal_id = VirtualTableMapper.user_virtual_to_internal(user_id)
         
-        # Fetch current doc
+        # Fetch current doc (or create new one if doesn't exist)
         try:
             current_doc = await self.dal.get_document("couch-sitter", internal_id)
         except HTTPException as e:
             if e.status_code == 404:
-                raise HTTPException(status_code=404, detail="User not found")
-            raise
+                # First update - create new user document
+                current_doc = {
+                    "_id": internal_id,
+                    "type": "user",
+                    "sub": requesting_user_id,
+                    "createdAt": datetime.utcnow().isoformat()
+                }
+                logger.info(f"Creating new user document: {internal_id}")
+            else:
+                raise
         
         # Validate immutable fields
         errors = VirtualTableValidator.validate_user_update(current_doc, updates)
@@ -396,8 +410,18 @@ class VirtualTableHandler:
             # Fetch current doc (in case it changed)
             try:
                 current_doc = await self.dal.get_document("couch-sitter", internal_id)
-            except HTTPException:
-                raise HTTPException(status_code=404, detail="User not found")
+            except HTTPException as e:
+                if e.status_code == 404:
+                    # Document may have been deleted, create new one
+                    current_doc = {
+                        "_id": internal_id,
+                        "type": "user",
+                        "sub": requesting_user_id,
+                        "createdAt": datetime.utcnow().isoformat()
+                    }
+                    logger.info(f"Creating new user document in retry: {internal_id}")
+                else:
+                    raise
             
             # Merge updates with current doc to preserve _rev and other fields
             merged_doc = {**current_doc}
@@ -810,8 +834,10 @@ class VirtualTableHandler:
         Virtual table handler: queries couch-sitter internally, no database permission needed.
         """
         try:
-            # Fetch the user's own document from couch-sitter
-            internal_id = VirtualTableMapper.user_virtual_to_internal(requesting_user_id)
+            # requesting_user_id is Clerk sub (e.g., user_34tzJwWB3jaQT6ZKPqZIQoJwsmz)
+            # Hash it to get virtual ID, then add prefix for internal ID
+            user_hash = VirtualTableAccessControl._hash_user_id(requesting_user_id)
+            internal_id = VirtualTableMapper.user_virtual_to_internal(user_hash)
             doc = await self.dal.get_document("couch-sitter", internal_id)
             
             # Filter out soft-deleted docs

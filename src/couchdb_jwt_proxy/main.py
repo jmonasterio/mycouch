@@ -41,6 +41,7 @@ from .bootstrap import BootstrapManager
 from .index_bootstrap import IndexBootstrap
 from .tenant_service import TenantService
 from . import auth_middleware
+from .tenant_validation import validate_tenant_id_format, TenantIdFormatError, validate_user_id_format, UserIdFormatError
 
 # Load environment variables
 load_dotenv()
@@ -1645,6 +1646,13 @@ async def get_tenant(tenant_id: str, authorization: Optional[str] = Header(None)
     if not requesting_user_id:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
+    # Validate tenant ID format
+    internal_tenant_id = VirtualTableMapper.tenant_virtual_to_internal(tenant_id)
+    try:
+        validate_tenant_id_format(internal_tenant_id)
+    except TenantIdFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     return await virtual_table_handler.get_tenant(tenant_id, requesting_user_id)
 
 @app.get("/__tenants")
@@ -1665,6 +1673,11 @@ async def list_tenants(authorization: Optional[str] = Header(None)):
     
     # Normalize to internal user ID format
     user_id = _normalize_clerk_sub_to_user_id(sub)
+    try:
+        validate_user_id_format(user_id)
+    except UserIdFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     logger.info(f"[LIST_TENANTS] Getting tenants for user: {user_id}")
     result = await virtual_table_handler.list_tenants(user_id)
     logger.info(f"[LIST_TENANTS] Returning {len(result)} tenants")
@@ -1687,6 +1700,11 @@ async def create_tenant(request: Request, authorization: Optional[str] = Header(
     
     # Normalize to internal user ID format
     user_id = _normalize_clerk_sub_to_user_id(sub)
+    try:
+        validate_user_id_format(user_id)
+    except UserIdFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     logger.info(f"[ROUTE] POST /__tenants: user_id={user_id}")
     body = await request.json()
     result = await virtual_table_handler.create_tenant(user_id, body)
@@ -1707,8 +1725,20 @@ async def update_tenant(tenant_id: str, request: Request, authorization: Optiona
     if not sub:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
+    # Validate tenant ID format
+    internal_tenant_id = VirtualTableMapper.tenant_virtual_to_internal(tenant_id)
+    try:
+        validate_tenant_id_format(internal_tenant_id)
+    except TenantIdFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     # Normalize to internal user ID format
     user_id = _normalize_clerk_sub_to_user_id(sub)
+    try:
+        validate_user_id_format(user_id)
+    except UserIdFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     logger.info(f"[ROUTE] PUT /__tenants/{tenant_id}: user_id={user_id}")
     body = await request.json()
     return await virtual_table_handler.update_tenant(tenant_id, user_id, body)
@@ -1728,8 +1758,19 @@ async def delete_tenant(tenant_id: str, authorization: Optional[str] = Header(No
     if not sub:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
+    # Validate tenant ID format
+    internal_tenant_id = VirtualTableMapper.tenant_virtual_to_internal(tenant_id)
+    try:
+        validate_tenant_id_format(internal_tenant_id)
+    except TenantIdFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     # Normalize to internal user ID format
     user_id = _normalize_clerk_sub_to_user_id(sub)
+    try:
+        validate_user_id_format(user_id)
+    except UserIdFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     
     # Get user's active_tenant_id for validation
     active_tenant_id = payload.get("active_tenant_id")

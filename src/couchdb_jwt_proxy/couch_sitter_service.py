@@ -509,8 +509,11 @@ class CouchSitterService:
         """
         Add a user to the admin tenant.
 
+        CALLER RESPONSIBILITY: user_id MUST be in internal format (user_<64-char-sha256-hash>).
+        Normalization from Clerk sub happens at the HTTP endpoint layer (main.py).
+
         Args:
-            user_id: User ID to add
+            user_id: User ID to add in internal format (user_<64-char-sha256-hash>)
 
         Raises:
             httpx.HTTPError: If database operations fail
@@ -1131,8 +1134,11 @@ class CouchSitterService:
         """
         Create a new workspace tenant (not personal).
 
+        CALLER RESPONSIBILITY: user_id MUST be in internal format (user_<64-char-sha256-hash>).
+        Normalization from Clerk sub happens at the HTTP endpoint layer (main.py).
+
         Args:
-            user_id: ID of the owner (creator)
+            user_id: ID of the owner (creator) in internal format (user_<64-char-sha256-hash>)
             name: Tenant name
             application_id: Application ID (e.g., 'roady')
 

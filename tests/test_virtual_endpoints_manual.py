@@ -191,7 +191,7 @@ class TestUserEndpoints:
     
     def test_get_own_user(self, client, sub_hash):
         """Test: User can read their own document"""
-        result = client.get_user(sub_hash)
+        result = client.get_user(f"user_{sub_hash}")
         
         # Debug output
         if result.get("_status_code", 200) != 200:
@@ -207,7 +207,7 @@ class TestUserEndpoints:
     def test_get_nonexistent_user(self, client):
         """Test: Getting nonexistent user returns 404"""
         fake_hash = "0000000000000000000000000000000000000000000000000000000000000000"
-        result = client.get_user(fake_hash)
+        result = client.get_user(f"user_{fake_hash}")
         
         # Should fail with 404
         assert result.get("detail") is not None or result.get("status_code") == 404
@@ -216,7 +216,7 @@ class TestUserEndpoints:
     def test_update_user_name(self, client, sub_hash):
         """Test: User can update their own name"""
         new_name = f"Test User {sub_hash[:8]}"
-        result = client.update_user(sub_hash, {"name": new_name})
+        result = client.update_user(f"user_{sub_hash}", {"name": new_name})
 
         # Should succeed (status 200)
         assert result.get("_status_code") == 200, f"Expected 200, got {result.get('_status_code')}"
@@ -226,7 +226,7 @@ class TestUserEndpoints:
     def test_update_user_email(self, client, sub_hash):
         """Test: User can update their own email"""
         new_email = f"test-{sub_hash[:8]}@example.com"
-        result = client.update_user(sub_hash, {"email": new_email})
+        result = client.update_user(f"user_{sub_hash}", {"email": new_email})
         
         # Should succeed
         assert result.get("email") == new_email, "Email should be updated"
@@ -235,7 +235,7 @@ class TestUserEndpoints:
     def test_update_other_user_fails(self, client, sub_hash):
         """Test: Cannot update another user's document"""
         fake_hash = "1111111111111111111111111111111111111111111111111111111111111111"
-        result = client.update_user(fake_hash, {"name": "Hacker"})
+        result = client.update_user(f"user_{fake_hash}", {"name": "Hacker"})
         
         # Should fail with 403
         assert result.get("detail") is not None
@@ -243,7 +243,7 @@ class TestUserEndpoints:
     
     def test_delete_self_fails(self, client, sub_hash):
         """Test: User cannot delete their own document"""
-        result = client.delete_user(sub_hash)
+        result = client.delete_user(f"user_{sub_hash}")
         
         # Should fail with 403
         assert result.get("detail") is not None
