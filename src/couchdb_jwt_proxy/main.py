@@ -1650,6 +1650,7 @@ async def get_tenant(tenant_id: str, authorization: Optional[str] = Header(None)
 @app.get("/__tenants")
 async def list_tenants(authorization: Optional[str] = Header(None)):
     """GET /__tenants - List all tenants user is member of"""
+    logger.info("[LIST_TENANTS] GET /__tenants called")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing authorization")
     
@@ -1664,7 +1665,10 @@ async def list_tenants(authorization: Optional[str] = Header(None)):
     
     # Normalize to internal user ID format
     user_id = _normalize_clerk_sub_to_user_id(sub)
-    return await virtual_table_handler.list_tenants(user_id)
+    logger.info(f"[LIST_TENANTS] Getting tenants for user: {user_id}")
+    result = await virtual_table_handler.list_tenants(user_id)
+    logger.info(f"[LIST_TENANTS] Returning {len(result)} tenants")
+    return result
 
 @app.post("/__tenants")
 async def create_tenant(request: Request, authorization: Optional[str] = Header(None)):

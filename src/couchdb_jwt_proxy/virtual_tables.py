@@ -530,6 +530,45 @@ class VirtualTableHandler:
         for doc in docs:
             if doc.get("_id", "").startswith("tenant_"):
                 doc["_id"] = VirtualTableMapper.tenant_internal_to_virtual(doc["_id"])
+            
+            # Populate members array from userIds
+            try:
+                user_ids = doc.get("userIds", [])
+                members = []
+                tenant_id_internal = doc.get("_id", "")
+                logger.info(f"[MEMBERS] Populating members for tenant {tenant_id_internal}: userIds={user_ids}")
+                
+                for uid in user_ids:
+                    try:
+                        user_response = await self.dal.get(f"couch-sitter/{uid}", "GET", None)
+                        if user_response and isinstance(user_response, dict) and "error" not in user_response:
+                            # Get role from user's tenants array
+                            role = "member"
+                            user_tenants = user_response.get("tenants", [])
+                            for ut in user_tenants:
+                                if ut.get("tenantId") == tenant_id_internal:
+                                    role = ut.get("role", "member")
+                                    break
+                            
+                            members.append({
+                                "userId": uid,
+                                "name": user_response.get("name", "Unknown"),
+                                "email": user_response.get("email", ""),
+                                "role": role
+                            })
+                    except Exception as e:
+                        logger.info(f"[MEMBERS] Could not load user {uid} for tenant members: {e}")
+                        members.append({
+                            "userId": uid,
+                            "name": "Unknown",
+                            "email": "",
+                            "role": "member"
+                        })
+                doc["members"] = members
+                logger.info(f"[MEMBERS] Added {len(members)} members to tenant {tenant_id_internal}")
+            except Exception as e:
+                logger.error(f"[MEMBERS] Error populating members for tenant {doc.get('_id')}: {e}", exc_info=True)
+                doc["members"] = []
         
         return docs
 
