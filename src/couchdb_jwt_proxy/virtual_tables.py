@@ -315,30 +315,33 @@ class VirtualTableHandler:
         sid: Optional[str],
         user_id_hash: str,
         active_tenant_id: str,
-        app_id: Optional[str] = None
+        app_id: Optional[str] = None,
+        application_id: Optional[str] = None
     ) -> None:
         """
         Track a tenant switch in the session document.
         Called when user updates their active_tenant_id.
-        
+
         Args:
             sid: Session ID from JWT (optional)
             user_id_hash: Hashed user ID
             active_tenant_id: The new active tenant ID
             app_id: Clerk issuer/app identifier (optional)
+            application_id: Database name (e.g., "roady" or "roady-staging")
         """
         if not sid or not self.session_service:
             logger.debug(f"[VIRTUAL] Skipping session tracking: sid={sid}, session_service={bool(self.session_service)}")
             return
-        
+
         try:
             await self.session_service.create_session(
                 sid=sid,
                 user_id=user_id_hash,
                 active_tenant_id=active_tenant_id,
-                app_id=app_id
+                app_id=app_id,
+                application_id=application_id
             )
-            logger.info(f"[VIRTUAL] ✓ Tracked tenant switch in session: {sid} → {active_tenant_id}")
+            logger.info(f"[VIRTUAL] ✓ Tracked tenant switch in session: {sid} → {active_tenant_id} (app: {application_id})")
         except Exception as e:
             logger.warning(f"[VIRTUAL] Failed to track session tenant switch: {e}")
             # Don't fail the user update if session tracking fails
@@ -349,17 +352,20 @@ class VirtualTableHandler:
         requesting_user_id: str,
         updates: Dict[str, Any],
         issuer: Optional[str] = None,
-        sid: Optional[str] = None
+        sid: Optional[str] = None,
+        application_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         PUT /__users/<id>
         Update user document; allowed fields only; user can only update self.
-        
+
         Args:
             user_id: Virtual user ID
             requesting_user_id: JWT 'sub' claim
             updates: Fields to update
             issuer: JWT 'iss' claim; used to find correct Clerk secret key
+            sid: JWT 'sid' claim; Clerk session ID for per-device tenant mapping
+            application_id: Database name (e.g., "roady" or "roady-staging")
         """
         # Access control
         if not VirtualTableAccessControl.can_read_user(requesting_user_id, user_id):
@@ -441,7 +447,8 @@ class VirtualTableHandler:
                         sid=sid,
                         user_id_hash=user_id,  # This is the hashed user ID from virtual URL
                         active_tenant_id=updates["active_tenant_id"],
-                        app_id=issuer
+                        app_id=issuer,
+                        application_id=application_id
                     )
                 
                 return merged_doc
@@ -527,30 +534,36 @@ class VirtualTableHandler:
         CALLER RESPONSIBILITY: user_id MUST be in internal format (user_<64-char-sha256-hash>).
         Normalization from Clerk sub happens at the HTTP endpoint layer (main.py).
         See VirtualTableAccessControl class docstring for upgrade notes.
+        
+        Uses Mango $in operator with userIds index:
+        In CouchDB, $in on array fields automatically checks if any array element matches.
+        Requires index on userIds field (created in index_bootstrap.py).
         """
-        # Query all tenant docs for this user (exclude soft-deleted documents)
-        # Filter out docs where either deletedAt or deleted fields are set (for both new and legacy formats)
+        # Fetch all tenants, then filter in Python for:
+        # 1. User membership (in userIds array)
+        # 2. Non-deleted status (no deletedAt or deleted fields)
+        # This avoids complex Mango query issues entirely.
         query = {
             "selector": {
-                "type": "tenant",
-                "userIds": {"$elemMatch": {"$eq": user_id}},
-                "$and": [
-                    {"deletedAt": {"$exists": False}},
-                    {"deleted": {"$ne": True}}
-                ]
+                "type": "tenant"
             }
         }
         
+        logger.info(f"[LIST_TENANTS] Querying for all non-deleted tenants")
         try:
             result = await self.dal.query_documents("couch-sitter", query)
         except Exception as e:
-            logger.error(f"Error querying tenants: {e}")
+            logger.error(f"[LIST_TENANTS] Error querying tenants: {e}")
             raise HTTPException(status_code=500, detail="Error querying tenants")
         
-        docs = result.get("docs", [])
+        all_docs = result.get("docs", [])
+        # Filter in Python: keep only tenants where:
+        # 1. User is in userIds array
+        # 2. Tenant is NOT deleted (no deletedAt field)
+        # This prevents deleted tenants from appearing in the user's band list after accepting invitations
+        docs = [doc for doc in all_docs if user_id in doc.get("userIds", []) and not doc.get("deletedAt")]
         
-        # Filter out soft-deleted (in-memory fallback filter) and convert _id to virtual format
-        docs = [doc for doc in docs if not doc.get("deletedAt") and not doc.get("deleted")]
+        logger.info(f"[LIST_TENANTS] Fetched {len(all_docs)} total tenants, {len(docs)} active match user {user_id[:20]}...")
         for doc in docs:
             if doc.get("_id", "").startswith("tenant_"):
                 doc["_id"] = VirtualTableMapper.tenant_internal_to_virtual(doc["_id"])
@@ -891,18 +904,20 @@ class VirtualTableHandler:
         Virtual table handler: queries couch-sitter internally, no database permission needed.
         """
         try:
-            # Query couch-sitter for tenants this user is member of (exclude soft-deleted)
-            # Filter out docs where either deletedAt (new format) or deleted (legacy) fields are set
+            # Query couch-sitter for all non-deleted tenants, then filter for user membership
             result = await self.dal.query_documents("couch-sitter", {
                 "selector": {
                     "type": "tenant",
-                    "userIds": {"$elemMatch": {"$eq": requesting_user_id}},
                     "$and": [
                         {"deletedAt": {"$exists": False}},
                         {"deleted": {"$ne": True}}
                     ]
                 }
             })
+            
+            # Filter in Python: keep only tenants where user is in userIds array
+            all_docs = result.get("docs", [])
+            result["docs"] = [doc for doc in all_docs if requesting_user_id in doc.get("userIds", [])]
         except Exception as e:
             logger.error(f"Error querying tenant changes: {e}")
             raise HTTPException(status_code=500, detail="Error querying changes")

@@ -54,6 +54,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[
         email = user_info.get("email")
         name = user_info.get("name")
         issuer = user_info.get("iss")
+        azp = user_info.get("azp")  # Authorized party - tells us where request came from
 
         if not sub:
             raise HTTPException(status_code=401, detail="Invalid token: missing sub claim")
@@ -70,7 +71,8 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[
             "email": email,
             "name": name,
             "issuer": issuer,
-            "application_id": "roady"  # Default app, can be determined from issuer if needed
+            "azp": azp,  # Pass through azp for applicationId determination
+            "application_id": "roady"  # Deprecated, use azp instead
         }
 
     except HTTPException:

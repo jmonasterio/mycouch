@@ -339,6 +339,10 @@ class CouchSitterService:
         app_id = requested_db_name or self.db_name
 
         if personal_tenant_id:
+            # Validate format - must be internal format (tenant_xyz)
+            if not personal_tenant_id.startswith("tenant_"):
+                raise ValueError(f"Invalid personal_tenant_id format: {personal_tenant_id}. Must start with 'tenant_'")
+            
             # Check if the personal tenant actually exists
             try:
                 tenant_response = await self._make_request("GET", personal_tenant_id)
@@ -356,6 +360,7 @@ class CouchSitterService:
                         tenant_doc["updatedAt"] = datetime.now(timezone.utc).isoformat()
                         await self._make_request("PUT", personal_tenant_id, json=tenant_doc)
                     
+                    # Return internal format (with tenant_ prefix) - caller must convert to virtual
                     return personal_tenant_id
                 else:
                     logger.warning(f"User {user_id} has personalTenantId but it's not marked as personal: {personal_tenant_id}")
@@ -367,7 +372,7 @@ class CouchSitterService:
 
         # Create missing personal tenant
         logger.warning(f"Creating missing personal tenant for user: {user_id}")
-        tenant_id = f"tenant_{uuid.uuid4()}"
+        tenant_id = f"tenant_{uuid.uuid4()}"  # Internal format (with prefix)
         current_time = datetime.now(timezone.utc).isoformat()
 
         tenant_doc = {
@@ -389,7 +394,7 @@ class CouchSitterService:
         # Create tenant
         await self._make_request("PUT", tenant_id, json=tenant_doc)
 
-        # Update user document
+        # Update user document with internal format for storage
         user_doc["personalTenantId"] = tenant_id
         if tenant_id not in user_doc.get("tenantIds", []):
             user_doc.setdefault("tenantIds", []).append(tenant_id)
@@ -398,7 +403,7 @@ class CouchSitterService:
         await self._make_request("PUT", user_id, json=user_doc)
 
         logger.info(f"Created missing personal tenant {tenant_id} for user {user_id}")
-        return tenant_id
+        return tenant_id  # Return internal format (with tenant_ prefix)
 
     async def _ensure_admin_tenant_exists(self) -> str:
         """
@@ -643,12 +648,25 @@ class CouchSitterService:
                 # New multi-tenant schema
                 logger.info(f"Existing user found with multi-tenant schema: {sub_hash}")
                 personal_tenant = next((t for t in tenants if t.get("personal", False)), None)
+                
+                # FIX: Ensure personal tenant has userIds field (for backward compatibility)
+                # Old tenants created before userIds was added need it populated
+                if personal_tenant and not personal_tenant.get("userIds"):
+                    logger.info(f"Adding missing userIds to personal tenant for {sub_hash}")
+                    personal_tenant["userIds"] = [sub]  # Use Clerk sub for userIds list
+                    user_doc["tenants"] = tenants
+                    user_doc["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                    await self._make_request("PUT", user_doc["_id"], json=user_doc)
 
                 if not personal_tenant:
                     # Create personal tenant for this app
                     logger.info(f"No personal tenant found for {sub_hash}, creating one for app: {requested_db_name}")
                     personal_tenant_id = await self.ensure_personal_tenant_exists(user_doc, requested_db_name)
-                    personal_tenant = {"tenantId": personal_tenant_id, "role": "owner", "personal": True}
+                    # Convert internal format (tenant_xyz) to virtual format (xyz) for tenantId
+                    if not personal_tenant_id.startswith("tenant_"):
+                        raise ValueError(f"ensure_personal_tenant_exists() returned invalid format: {personal_tenant_id}. Must start with 'tenant_'")
+                    tenant_id_virtual = personal_tenant_id[7:]  # Strip "tenant_" prefix
+                    personal_tenant = {"tenantId": tenant_id_virtual, "role": "owner", "personal": True, "userIds": [sub]}  # Use Clerk sub
                     tenants.append(personal_tenant)
                     
                     # IMPORTANT: Update user document with new tenant
@@ -685,6 +703,15 @@ class CouchSitterService:
                     tenant_doc = tenant_response.json()
                     tenant_name = tenant_doc.get("name", "")
                     current_app_id = tenant_doc.get("applicationId")
+                    
+                    # FIX: Sync userIds from actual tenant doc back to user's tenants array
+                    # This ensures denormalized copy stays fresh
+                    if tenant_doc.get("userIds") and personal_tenant.get("userIds") != tenant_doc.get("userIds"):
+                        logger.info(f"Syncing userIds from tenant {active_tenant_id} to user's tenants array")
+                        personal_tenant["userIds"] = tenant_doc.get("userIds")
+                        user_doc["tenants"] = tenants
+                        user_doc["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                        await self._make_request("PUT", user_doc["_id"], json=user_doc)
                     
                     tenant_needs_update = False
                     
@@ -1276,8 +1303,8 @@ class CouchSitterService:
         Add a user to a tenant.
 
         Args:
-            tenant_id: Tenant ID
-            user_id: User ID to add
+            tenant_id: Tenant ID (internal format: tenant_uuid)
+            user_id: User ID to add (internal format: user_hash)
             role: Role to assign (member, admin, owner)
 
         Returns:
@@ -1287,9 +1314,12 @@ class CouchSitterService:
             httpx.HTTPError: If database operation fails
         """
         try:
+            logger.info(f"[ADD_USER_TO_TENANT] START: tenant_id={tenant_id}, user_id={user_id}, role={role}")
             tenant = await self.get_tenant(tenant_id)
             if not tenant:
                 raise ValueError(f"Tenant not found: {tenant_id}")
+            
+            logger.info(f"[ADD_USER_TO_TENANT] Tenant loaded: _id={tenant.get('_id')}, current userIds={tenant.get('userIds', [])}")
 
             # Add user to userIds if not already present
             user_ids = tenant.get("userIds", [])
@@ -1298,34 +1328,145 @@ class CouchSitterService:
                 tenant["userIds"] = user_ids
                 tenant["updatedAt"] = datetime.now(timezone.utc).isoformat()
                 
+                logger.info(f"[ADD_USER_TO_TENANT] Updated userIds: {user_ids}")
                 response = await self._make_request("PUT", tenant_id, json=tenant)
                 updated = response.json()
-                logger.info(f"Added user {user_id} to tenant {tenant_id}")
+                logger.info(f"[ADD_USER_TO_TENANT] Tenant updated successfully: {tenant_id}")
+            else:
+                logger.info(f"[ADD_USER_TO_TENANT] User {user_id} already in userIds")
 
             # Update user's tenants array with the role (single source of truth)
+            # IMPORTANT: This method cleans up deleted tenants every time it's called.
+            # See: https://github.com/steveyegge/amp-threads/issues/invitation-deleted-tenants
+            # PROBLEM: Users who accept invitations from accounts with deleted tenants would see
+            # those deleted tenants in their band list (e.g., 6 deleted bands appear after accepting
+            # 1 invitation). This happened because the user document had stale references to deleted
+            # tenants, and PouchDB would sync all of them.
+            # SOLUTION: Always verify and clean both tenants[] and tenantIds[] arrays before saving.
+            # This ensures deleted/missing tenants are never synced to the client's PouchDB.
             try:
                 response = await self._make_request("GET", user_id)
                 user_doc = response.json()
                 
+                # ========== STEP 1: Clean tenants array ==========
+                # Verify each tenant in the tenants[] array still exists and is not deleted.
+                # This is the new schema (tenants = [{tenantId, role, userIds, joinedAt}, ...])
                 tenants = user_doc.get("tenants", [])
-                # Check if user already has this tenant
-                tenant_entry = next((t for t in tenants if t.get("tenantId") == tenant_id), None)
+                initial_count = len(tenants)
+                cleaned_tenants = []
                 
+                for t in tenants:
+                    # Skip tenants explicitly marked as deleted
+                    if t.get("deleted_at") or t.get("deletedAt"):
+                        continue
+                    
+                    # Verify tenant still exists in couch-sitter by fetching it
+                    tenant_id_to_check = t.get("tenantId")
+                    if tenant_id_to_check:
+                        try:
+                            # Convert virtual ID to internal format (tenant_<uuid>)
+                            internal_id = f"tenant_{tenant_id_to_check}" if not tenant_id_to_check.startswith("tenant_") else tenant_id_to_check
+                            verify_response = await self._make_request("GET", internal_id)
+                            tenant_doc = verify_response.json()
+                            
+                            # Only keep if tenant exists, is not deleted, and user is still a member
+                            # CRITICAL: Verify user is in the tenant's userIds array
+                            # This prevents stale tenant references from being kept
+                            if tenant_doc and not tenant_doc.get("deletedAt") and user_id in tenant_doc.get("userIds", []):
+                                cleaned_tenants.append(t)
+                            elif tenant_doc and not tenant_doc.get("deletedAt"):
+                                logger.warning(f"Removing tenant {internal_id} - user {user_id} not a member anymore")
+                            else:
+                                logger.warning(f"Removing deleted tenant {internal_id} from user's tenants array")
+                        except httpx.HTTPStatusError as e:
+                            if e.response.status_code == 404:
+                                logger.warning(f"Tenant {internal_id} not found, removing from user's tenants array")
+                            else:
+                                logger.error(f"Error verifying tenant {internal_id}: {e}")
+                                # Keep it in case of error (don't lose data on network issues)
+                                cleaned_tenants.append(t)
+                    else:
+                        # Keep tenants without tenantId (shouldn't happen, but be conservative)
+                        cleaned_tenants.append(t)
+                
+                if len(cleaned_tenants) < initial_count:
+                    logger.info(f"Cleaned up {initial_count - len(cleaned_tenants)} deleted/missing tenants from user's tenants array")
+                    tenants = cleaned_tenants
+                
+                # ========== STEP 2: Check if tenant already exists ==========
+                # Convert tenant_id to virtual format for comparison
+                tenant_id_virtual = tenant_id[7:] if tenant_id.startswith("tenant_") else tenant_id
+                
+                # Check if user already has this tenant (check both old and new formats for safety)
+                tenant_entry = next((t for t in tenants if t.get("tenantId") == tenant_id_virtual or t.get("tenantId") == tenant_id), None)
+                
+                current_time = datetime.now(timezone.utc).isoformat()
+                
+                # ========== STEP 3: Clean tenantIds array (legacy schema) ==========
+                # The tenantIds[] array is the legacy schema used by get_user_tenants().
+                # CRITICAL: We must keep this in sync with tenants[] and clean it every time.
+                # This ensures deleted tenants never appear in get_user_tenants() results.
+                tenant_ids = user_doc.get("tenantIds", [])
+                tenant_ids_initial_count = len(tenant_ids)
+                cleaned_tenant_ids = []
+                
+                for tid in tenant_ids:
+                    try:
+                        # Check if tenant still exists and is not deleted
+                        verify_response = await self._make_request("GET", tid)
+                        tenant_doc = verify_response.json()
+                        
+                        # CRITICAL: Also verify user is still a member of this tenant
+                        # A tenant may exist and not be deleted, but the user may not be in its userIds array
+                        # This can happen if the inviter synced their old data with multiple tenants
+                        if tenant_doc and not tenant_doc.get("deletedAt"):
+                            # Verify user is actually in this tenant's userIds
+                            if user_id in tenant_doc.get("userIds", []):
+                                cleaned_tenant_ids.append(tid)
+                            else:
+                                logger.warning(f"Removing tenant ID {tid} from tenantIds - user {user_id} not a member")
+                        else:
+                            logger.warning(f"Removing deleted tenant ID {tid} from tenantIds array")
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code == 404:
+                            logger.warning(f"Tenant ID {tid} not found, removing from tenantIds array")
+                        else:
+                            # Keep on error to avoid losing data on network issues
+                            cleaned_tenant_ids.append(tid)
+                
+                if len(cleaned_tenant_ids) != tenant_ids_initial_count:
+                    logger.info(f"Cleaned up tenantIds: {tenant_ids_initial_count} → {len(cleaned_tenant_ids)}")
+                
+                # ========== STEP 4: Add new tenant and persist ==========
                 if not tenant_entry:
-                    current_time = datetime.now(timezone.utc).isoformat()
+                    # Create new tenant entry with metadata
                     tenant_entry = {
-                        "tenantId": tenant_id,
+                        "tenantId": tenant_id_virtual,  # Store in virtual format (no "tenant_" prefix)
                         "role": role,
                         "personal": False,
+                        "userIds": user_ids,  # Include member list in user's tenants array
                         "joinedAt": current_time
                     }
                     tenants.append(tenant_entry)
                     user_doc["tenants"] = tenants
+                    
+                    # Add new tenant ID if not already present
+                    if tenant_id not in cleaned_tenant_ids:
+                        cleaned_tenant_ids.append(tenant_id)
+                    
+                    user_doc["tenantIds"] = cleaned_tenant_ids
                     user_doc["updatedAt"] = current_time
                     await self._make_request("PUT", user_id, json=user_doc)
                     logger.info(f"Added tenant {tenant_id} with role '{role}' to user {user_id}")
                 else:
-                    logger.debug(f"User {user_id} already member of tenant {tenant_id}")
+                    # User already a member, but STILL save cleaned arrays
+                    # This is important: even if the user is already a member, we persist the cleanup
+                    # so that deleted tenants don't persist in PouchDB or confuse future operations
+                    user_doc["tenantIds"] = cleaned_tenant_ids
+                    user_doc["tenants"] = tenants
+                    user_doc["updatedAt"] = current_time
+                    await self._make_request("PUT", user_id, json=user_doc)
+                    logger.debug(f"User {user_id} already member of tenant {tenant_id}, persisted cleaned arrays")
                     
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:

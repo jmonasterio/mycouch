@@ -112,8 +112,7 @@ class BootstrapManager:
             "userIds": [sub_normalized],  # Clerk sub (not hashed) - for membership queries
             "applicationId": "roady",
             "metadata": {
-                "isPersonal": True,
-                "autoCreated": True
+                "isPersonal": True
             },
             "createdAt": now,
             "updatedAt": now
@@ -134,6 +133,7 @@ class BootstrapManager:
                     "tenantId": personal_tenant_id,
                     "role": "owner",
                     "personal": True,
+                    "userIds": [sub_normalized],  # Member list in user's tenants array
                     "joinedAt": now
                 }
             ],

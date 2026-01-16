@@ -44,27 +44,46 @@ def create_tenant_router(couch_sitter_service, invite_service):
         Returns:
             Created tenant document
         """
-        try:
-            name = request_data.get("name")
-            if not name:
-                raise HTTPException(status_code=400, detail="Tenant name is required")
+        name = request_data.get("name")
+        if not name:
+            raise HTTPException(status_code=400, detail="Tenant name is required")
 
+        try:
             sub = current_user.get("sub")
-            user_id = current_user.get("user_id")
             email = current_user.get("email")
             name_from_jwt = current_user.get("name")
-            app_id = current_user.get("application_id", "roady")
+
+            # Determine applicationId from JWT's azp (authorized party) claim
+            # azp tells us where the request came from (trusted, signed in JWT)
+            # localhost → roady-staging, production → roady
+            azp = current_user.get("azp", "")
+            if "localhost" in azp or "127.0.0.1" in azp:
+                app_id = "roady-staging"
+                logger.info(f"Using roady-staging based on azp: {azp}")
+            else:
+                app_id = "roady"
+                logger.info(f"Using roady based on azp: {azp}")
+
+            logger.info(f"Creating tenant with applicationId: {app_id}")
             
             # CRITICAL: Ensure user exists before creating tenant
             # This creates the user document with correct ID format if it doesn't exist
             logger.info(f"Ensuring user exists for sub: {sub}")
-            await couch_sitter_service.ensure_user_exists(
+            user_info = await couch_sitter_service.ensure_user_exists(
                 sub=sub,
                 email=email,
                 name=name_from_jwt,
                 requested_db_name=app_id
             )
+            
+            # Extract user_id from the UserTenantInfo object
+            user_id = user_info.user_id
+            logger.info(f"Got user_id from ensure_user_exists: {user_id}")
+            
+            if not user_id:
+                raise ValueError("Failed to obtain user_id from ensure_user_exists()")
 
+            logger.info(f"Creating workspace tenant for user {user_id}, name={name}, app_id={app_id}")
             tenant = await couch_sitter_service.create_workspace_tenant(
                 user_id=user_id,
                 name=name,
@@ -88,9 +107,10 @@ def create_tenant_router(couch_sitter_service, invite_service):
             }
 
         except ValueError as e:
+            logger.error(f"Validation error creating tenant: {e}")
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            logger.error(f"Error creating tenant: {e}")
+            logger.error(f"Error creating tenant: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to create tenant")
 
     @router.get("/my-tenants")
@@ -259,10 +279,6 @@ def create_tenant_router(couch_sitter_service, invite_service):
                 logger.error(f"Tenant not found: {tenant_id}")
                 raise HTTPException(status_code=404, detail=f"Tenant not found: {tenant_id}")
 
-            # Cannot invite to personal tenants
-            if tenant.get("metadata", {}).get("autoCreated"):
-                raise HTTPException(status_code=400, detail="Cannot invite users to personal tenant")
-
             # TODO: Check if owner or admin (roles not yet implemented, skipping for now)
             # user_role = await couch_sitter_service.get_user_role_for_tenant(user_id, tenant_id)
             # if user_role not in ["owner", "admin"]:
@@ -387,13 +403,13 @@ def create_tenant_router(couch_sitter_service, invite_service):
     ):
         """
         Accept an invitation and add user to tenant.
-
+    
         Request:
             - inviteToken: Invitation token
-
+    
         Returns:
             Success with tenant info
-
+    
         Errors:
             - 404: Invalid or revoked token
             - 410: Expired token
@@ -403,7 +419,7 @@ def create_tenant_router(couch_sitter_service, invite_service):
             invite_token = request_data.get("inviteToken")
             if not invite_token:
                 raise HTTPException(status_code=400, detail="inviteToken is required")
-
+    
             # Validate token
             invitation = await invite_service.validate_token(invite_token)
             if not invitation:
@@ -411,10 +427,18 @@ def create_tenant_router(couch_sitter_service, invite_service):
                 # We need to find the invitation by token to check status
                 # For now, return 404 for invalid/revoked
                 raise HTTPException(status_code=404, detail="This invitation is no longer valid or has expired")
-
+    
             user_id = current_user.get("user_id")
             tenant_id = invitation.get("tenantId")
             role = invitation.get("role", "editor")
+            
+            # CRITICAL: Validate tenant_id format from invitation is internal format (tenant_uuid)
+            # Invitations must store tenant_id in internal format. Fail fast if wrong.
+            try:
+                validate_tenant_id_format(tenant_id)
+            except TenantIdFormatError as e:
+                logger.error(f"Invalid tenant_id in invitation {invitation.get('_id')}: {tenant_id} - {e}")
+                raise HTTPException(status_code=500, detail="Invitation data is corrupted (invalid tenant format)")
 
             # Cannot accept your own invitation
             if invitation.get("createdBy") == user_id:
@@ -427,25 +451,33 @@ def create_tenant_router(couch_sitter_service, invite_service):
             if tenant_id in existing_tenant_ids:
                 raise HTTPException(status_code=409, detail="You already belong to this band")
 
+            # Get tenant for response (validate it exists and is not deleted)
+            tenant = await couch_sitter_service.get_tenant(tenant_id)
+            if not tenant:
+                raise HTTPException(status_code=404, detail="Tenant not found or has been deleted")
+
             # Add user to tenant
             await couch_sitter_service.add_user_to_tenant(tenant_id, user_id, role)
 
             # Mark invitation as accepted
             await invite_service.accept_invitation(invitation, user_id)
 
-            # Get tenant for response
-            tenant = await couch_sitter_service.get_tenant(tenant_id)
-
             logger.info(f"User {user_id} accepted invitation to tenant {tenant_id}")
 
             # Convert to virtual ID format (remove tenant_ prefix)
             virtual_tenant_id = tenant_id.replace("tenant_", "") if isinstance(tenant_id, str) and tenant_id.startswith("tenant_") else tenant_id
 
+            # Return complete tenant document for frontend to use immediately
             return {
                 "success": True,
-                "tenantId": virtual_tenant_id,
-                "tenantName": tenant.get("name"),
-                "role": role
+                "_id": tenant_id,  # Internal format for local PouchDB
+                "type": "tenant",
+                "tenantId": virtual_tenant_id,  # Virtual ID for API calls
+                "name": tenant.get("name"),
+                "role": role,
+                "userIds": tenant.get("userIds", []),  # Member list
+                "createdAt": tenant.get("createdAt"),
+                "members": tenant.get("members", [])  # For display in UI
             }
 
         except HTTPException:

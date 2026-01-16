@@ -44,20 +44,22 @@ class SessionService:
         sid: str,
         user_id: str,
         active_tenant_id: str,
-        app_id: Optional[str] = None
+        app_id: Optional[str] = None,
+        application_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Create or update a session document in CouchDB and cache.
-        
+
         Args:
             sid: Clerk session ID (e.g., "sess_abc123xyz")
             user_id: User ID hash (from JWT sub)
             active_tenant_id: Current tenant for this session
             app_id: Clerk issuer/app identifier (e.g., "https://my-app.clerk.accounts.dev")
-            
+            application_id: Database name (e.g., "roady" or "roady-staging")
+
         Returns:
             Session document that was created/updated
-            
+
         Raises:
             Exception: If CouchDB operation fails
         """
@@ -78,6 +80,7 @@ class SessionService:
             "sid": sid,
             "user_id": user_id,
             "app_id": app_id,
+            "application_id": application_id,  # Database name: roady or roady-staging
             "active_tenant_id": active_tenant_id,
             "created_at": existing_doc.get("created_at") if existing_doc else now,  # Preserve original creation time
             "expiresAt": expires_at

@@ -4,6 +4,12 @@
 # Set PYTHONPATH to include src directory
 export PYTHONPATH=src
 
+# Parse arguments
+WATCH_MODE=false
+if [ "$1" == "--watch" ] || [ "$1" == "-w" ]; then
+    WATCH_MODE=true
+fi
+
 # Run uvicorn with shorter shutdown timeout and better signal handling
 # --timeout-graceful-shutdown 10: Wait max 10 seconds for graceful shutdown
 # --access-log: Enable access logging for debugging
@@ -21,8 +27,15 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo "Starting proxy..."
-# Use Python import method instead of uvicorn CLI to avoid CrowdStrike blocking
-# Also avoid 'uv run' which spawns subprocesses that CrowdStrike may flag
-.venv/Scripts/python run.py 
-#--stdlib
+if [ "$WATCH_MODE" = true ]; then
+    echo "🔄 Starting proxy with auto-reload on Python changes..."
+    echo "Usage: ./cli.sh --watch (or -w)"
+    # Use uvicorn with --reload flag to watch for Python file changes
+    PYTHONPATH=src uv run uvicorn couchdb_jwt_proxy.main:app --reload --host $PROXY_HOST --port $PROXY_PORT
+else
+    echo "Starting proxy (production mode - no auto-reload)..."
+    echo "Tip: Use './cli.sh --watch' for development with auto-reload"
+    # Use Python import method instead of uvicorn CLI to avoid CrowdStrike blocking
+    # Also avoid 'uv run' which spawns subprocesses that CrowdStrike may flag
+    .venv/Scripts/python run.py 
+fi

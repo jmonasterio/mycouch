@@ -175,7 +175,7 @@ class InviteService:
         Create a new invitation for a workspace tenant.
         
         Args:
-            tenant_id: Tenant ID
+            tenant_id: Tenant ID (internal format: tenant_uuid)
             tenant_name: Tenant name (denormalized for preview)
             email: Email of the invitee
             role: Role to assign (member, admin)
@@ -187,7 +187,17 @@ class InviteService:
             
         Raises:
             httpx.HTTPError: If database operation fails
+            ValueError: If tenant_id is not in internal format
         """
+        # CRITICAL: Validate tenant_id is in internal format (tenant_uuid)
+        # The caller is responsible for sending correct format. No silent conversions.
+        if not isinstance(tenant_id, str) or not tenant_id.startswith("tenant_"):
+            raise ValueError(
+                f"Invalid tenant_id format in invitation: '{tenant_id}'. "
+                f"Expected internal format 'tenant_<uuid>', got format without 'tenant_' prefix. "
+                f"Caller must prepend 'tenant_' prefix before calling create_invitation."
+            )
+        
         invite_id = f"invite_{uuid.uuid4()}"
         plain_token = self.generate_token()
         token_hash = self.hash_token(plain_token)
@@ -198,7 +208,7 @@ class InviteService:
         invitation_doc = {
             "_id": invite_id,
             "type": "invitation",
-            "tenantId": tenant_id,
+            "tenantId": tenant_id,  # Stored in internal format (tenant_uuid)
             "tenantName": tenant_name,
             "email": email,
             "role": role,

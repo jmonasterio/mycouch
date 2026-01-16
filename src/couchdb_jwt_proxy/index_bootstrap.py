@@ -126,6 +126,10 @@ class IndexBootstrap:
                 "index": {"fields": ["type", "expiresAt"]},
                 "name": "session-expiry",
             },
+            {
+                "index": {"fields": ["userIds"]},
+                "name": "userIds",
+            },
         ]
 
         logger.info("📦 Creating indexes on 'couch-sitter'...")

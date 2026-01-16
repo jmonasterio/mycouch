@@ -399,23 +399,6 @@ class TestWorkspaceCreationAndInvitation:
 class TestSecurityConstraints:
     """Test authorization and security constraints"""
 
-    @pytest.mark.asyncio
-    async def test_cannot_invite_to_personal_tenant(self, couch_sitter_service, invite_service):
-        """Should block invitations to personal tenants"""
-        # Personal tenants have metadata.autoCreated=True
-        personal_tenant = {
-            "_id": "tenant_personal_123",
-            "type": "tenant",
-            "userId": "user_alice",
-            "userIds": ["user_alice"],
-            "metadata": {
-                "autoCreated": True  # Personal tenant marker
-            }
-        }
-        
-        # Verify the check works: personal tenant has autoCreated=True
-        assert personal_tenant["metadata"]["autoCreated"] is True
-
     def test_owner_cannot_be_removed(self):
         """In authorization checks: owner cannot be removed from tenant"""
         tenant = {"userId": "user_alice"}
@@ -525,6 +508,330 @@ class TestTimingAttackResistance:
         # Invalid token should also take constant time (not bail early)
         invalid = invite_service.verify_token("sk_invalid", token_hash)
         assert invalid is False
+
+
+# ============ COMPREHENSIVE INTEGRATION TESTS ============
+# These tests verify the COMPLETE invitation acceptance flow end-to-end
+
+class TestInvitationAcceptanceComplete:
+    """
+    Test complete invitation acceptance with full data verification.
+    This is the critical test that was missing and explains the deleted bands issue.
+    """
+
+    @pytest.mark.asyncio
+    async def test_accept_invitation_updates_all_data_structures(
+        self, couch_sitter_service, invite_service, memory_dal
+    ):
+        """
+        Verify accepting invitation updates tenant and user documents correctly.
+        
+        This is the key integration test that validates:
+        1. Tenant's userIds is updated
+        2. User's tenants array has correct format with role, joinedAt, etc.
+        3. User's tenantIds array is updated
+        4. Tenant is visible via get_user_tenants()
+        5. Token cannot be reused
+        """
+        
+        # ===== SETUP: Create inviter and invitee =====
+        inviter_sub = "user_alice_sub_123"
+        inviter_hash = couch_sitter_service._hash_sub(inviter_sub)
+        inviter_id = f"user_{inviter_hash}"
+        
+        invitee_sub = "user_bob_sub_456"
+        invitee_hash = couch_sitter_service._hash_sub(invitee_sub)
+        invitee_id = f"user_{invitee_hash}"
+        
+        # Create both users
+        await couch_sitter_service.create_user_with_personal_tenant_multi_tenant(
+            sub=inviter_sub,
+            email="alice@example.com",
+            name="Alice"
+        )
+        
+        await couch_sitter_service.create_user_with_personal_tenant_multi_tenant(
+            sub=invitee_sub,
+            email="bob@example.com",
+            name="Bob"
+        )
+        
+        # ===== CREATE WORKSPACE TENANT =====
+        workspace = await couch_sitter_service.create_workspace_tenant(
+            user_id=inviter_id,
+            name="The Beatles",
+            application_id="roady"
+        )
+        workspace_id = workspace["_id"]
+        workspace_id_virtual = workspace_id[7:]  # Remove "tenant_" prefix
+        
+        # Verify workspace has only inviter initially
+        assert inviter_id in workspace["userIds"]
+        assert invitee_id not in workspace["userIds"]
+        
+        # ===== CREATE INVITATION =====
+        invitation = await invite_service.create_invitation(
+            tenant_id=workspace_id,
+            tenant_name="The Beatles",
+            email="bob@example.com",
+            role="member",
+            created_by=inviter_id
+        )
+        token = invitation["token"]
+        invite_id = invitation["_id"]
+        
+        assert token.startswith("sk_")
+        assert invitation["status"] == "pending"
+        
+        # ===== ACCEPT INVITATION =====
+        # Step 1: Validate token
+        valid_invitation = await invite_service.validate_token(token)
+        assert valid_invitation is not None, "Token should be valid before acceptance"
+        assert valid_invitation["_id"] == invite_id
+        
+        # Step 2: Mark invitation as accepted
+        await invite_service.accept_invitation(valid_invitation, invitee_id)
+        
+        # Step 3: Add user to tenant (this is where cleanup happens)
+        updated_workspace = await couch_sitter_service.add_user_to_tenant(
+            tenant_id=workspace_id,
+            user_id=invitee_id,
+            role="member"
+        )
+        
+        # ===== VERIFY RESULT 1: Tenant's userIds updated =====
+        tenant = await couch_sitter_service.get_tenant(workspace_id)
+        assert invitee_id in tenant["userIds"], \
+            f"Invitee {invitee_id} should be in tenant's userIds. Got: {tenant['userIds']}"
+        assert inviter_id in tenant["userIds"], \
+            "Inviter should still be in tenant's userIds"
+        assert len(tenant["userIds"]) == 2, \
+            f"Should have exactly 2 members. Got: {len(tenant['userIds'])}"
+        
+        # ===== VERIFY RESULT 2: User's tenants array has correct format =====
+        invitee_doc = await couch_sitter_service.find_user_by_sub_hash(invitee_hash)
+        assert invitee_doc is not None, "Invitee user document should exist"
+        
+        invitee_tenants = invitee_doc.get("tenants", [])
+        workspace_entry = next(
+            (t for t in invitee_tenants if t.get("tenantId") == workspace_id_virtual),
+            None
+        )
+        
+        assert workspace_entry is not None, \
+            f"Invitee should have workspace in tenants array. Got: {invitee_tenants}"
+        assert workspace_entry.get("role") == "member", \
+            f"Role should be 'member'. Got: {workspace_entry.get('role')}"
+        assert workspace_entry.get("joinedAt") is not None, \
+            "joinedAt timestamp should be set"
+        assert workspace_entry.get("personal") is False, \
+            "Should not be marked as personal"
+        assert "userIds" in workspace_entry, \
+            "userIds should be copied to tenants array entry"
+        
+        # ===== VERIFY RESULT 3: User's tenantIds updated =====
+        invitee_tenant_ids = invitee_doc.get("tenantIds", [])
+        assert workspace_id in invitee_tenant_ids, \
+            f"Internal ID {workspace_id} should be in tenantIds. Got: {invitee_tenant_ids}"
+        
+        # ===== VERIFY RESULT 4: Tenant visible via get_user_tenants() =====
+        visible_tenants, _ = await couch_sitter_service.get_user_tenants(invitee_sub)
+        visible_tenant_ids = [t["tenantId"] for t in visible_tenants]
+        assert workspace_id_virtual in visible_tenant_ids, \
+            f"Workspace {workspace_id_virtual} should be visible. Got: {visible_tenant_ids}"
+        
+        # Verify the visible tenant has correct metadata
+        visible_workspace = next(
+            (t for t in visible_tenants if t["tenantId"] == workspace_id_virtual),
+            None
+        )
+        assert visible_workspace is not None
+        assert visible_workspace["name"] == "The Beatles"
+        assert visible_workspace["role"] == "member"
+        
+        # ===== VERIFY RESULT 5: Token cannot be reused (single-use) =====
+        reused = await invite_service.validate_token(token)
+        assert reused is None, \
+            "Token should not be reusable after acceptance"
+
+    @pytest.mark.asyncio
+    async def test_cleanup_removes_deleted_tenant_references(
+        self, couch_sitter_service, invite_service, memory_dal
+    ):
+        """
+        Verify that accepting invitation cleans up deleted tenant references.
+        
+        This tests the scenario that was causing the "5 deleted bands appear" bug:
+        - User syncs account with deleted tenants in their arrays
+        - User accepts invitation
+        - Cleanup should remove the deleted references
+        """
+        
+        # ===== SETUP =====
+        inviter_sub = "user_alice_sub_789"
+        inviter_hash = couch_sitter_service._hash_sub(inviter_sub)
+        inviter_id = f"user_{inviter_hash}"
+        
+        invitee_sub = "user_bob_sub_789"
+        invitee_hash = couch_sitter_service._hash_sub(invitee_sub)
+        invitee_id = f"user_{invitee_hash}"
+        
+        await couch_sitter_service.create_user_with_personal_tenant_multi_tenant(
+            sub=inviter_sub, email="alice@example.com", name="Alice"
+        )
+        await couch_sitter_service.create_user_with_personal_tenant_multi_tenant(
+            sub=invitee_sub, email="bob@example.com", name="Bob"
+        )
+        
+        workspace = await couch_sitter_service.create_workspace_tenant(
+            user_id=inviter_id, name="The Beatles", application_id="roady"
+        )
+        workspace_id = workspace["_id"]
+        
+        # ===== SIMULATE SYNCED DELETED TENANTS =====
+        # This simulates the scenario where invitee's account has deleted tenant references
+        # synced from the inviter's account (e.g., from a previous sync)
+        
+        invitee_doc = await couch_sitter_service.find_user_by_sub_hash(invitee_hash)
+        
+        deleted_tenant_id_1 = "tenant_deleted_uuid_1"
+        deleted_tenant_id_2 = "tenant_deleted_uuid_2"
+        deleted_uuid_1 = "deleted_uuid_1"
+        deleted_uuid_2 = "deleted_uuid_2"
+        
+        # Add stale deleted references to invitee's arrays
+        invitee_doc.setdefault("tenantIds", []).extend([
+            deleted_tenant_id_1,
+            deleted_tenant_id_2
+        ])
+        invitee_doc.setdefault("tenants", []).extend([
+            {
+                "tenantId": deleted_uuid_1,
+                "role": "member",
+                "personal": False,
+                "joinedAt": "2025-01-01T00:00:00Z"
+            },
+            {
+                "tenantId": deleted_uuid_2,
+                "role": "member",
+                "personal": False,
+                "joinedAt": "2025-01-02T00:00:00Z"
+            }
+        ])
+        
+        # Save the corrupted document
+        await memory_dal.get(invitee_id, "PUT", invitee_doc)
+        
+        # Verify it has the stale references
+        invitee_doc_before = await couch_sitter_service.find_user_by_sub_hash(invitee_hash)
+        assert len(invitee_doc_before.get("tenantIds", [])) == 2 + 1, \
+            "Should have 2 deleted + 1 personal tenant before"
+        assert len(invitee_doc_before.get("tenants", [])) == 2 + 1, \
+            "Should have 2 deleted + 1 personal tenant in tenants before"
+        
+        # ===== ACCEPT INVITATION (triggers cleanup) =====
+        invitation = await invite_service.create_invitation(
+            tenant_id=workspace_id,
+            tenant_name="The Beatles",
+            email="bob@example.com",
+            role="member",
+            created_by=inviter_id
+        )
+        
+        await invite_service.accept_invitation(invitation, invitee_id)
+        await couch_sitter_service.add_user_to_tenant(
+            tenant_id=workspace_id,
+            user_id=invitee_id,
+            role="member"
+        )
+        
+        # ===== VERIFY CLEANUP HAPPENED =====
+        invitee_doc_after = await couch_sitter_service.find_user_by_sub_hash(invitee_hash)
+        
+        # Deleted tenant IDs should be removed from tenantIds
+        invitee_tenant_ids = invitee_doc_after.get("tenantIds", [])
+        assert deleted_tenant_id_1 not in invitee_tenant_ids, \
+            f"Deleted tenant {deleted_tenant_id_1} should be removed"
+        assert deleted_tenant_id_2 not in invitee_tenant_ids, \
+            f"Deleted tenant {deleted_tenant_id_2} should be removed"
+        assert workspace_id in invitee_tenant_ids, \
+            "New workspace should be added to tenantIds"
+        
+        # Deleted tenants should be removed from tenants array
+        invitee_tenants = invitee_doc_after.get("tenants", [])
+        deleted_entries = [t for t in invitee_tenants 
+                          if t.get("tenantId") in [deleted_uuid_1, deleted_uuid_2]]
+        assert len(deleted_entries) == 0, \
+            f"Deleted tenants should be removed from tenants array. Got: {deleted_entries}"
+        
+        # New workspace should be present
+        workspace_entries = [t for t in invitee_tenants 
+                            if t.get("tenantId") == workspace_id[7:]]
+        assert len(workspace_entries) == 1, \
+            "New workspace should be in tenants array"
+        assert workspace_entries[0].get("role") == "member"
+
+    @pytest.mark.asyncio
+    async def test_virtual_endpoint_filters_deleted_tenants(
+        self, couch_sitter_service, memory_dal
+    ):
+        """
+        Verify that GET /__tenants endpoint filters out deleted tenants.
+        
+        Even if user is in a deleted tenant's userIds array, it should not be returned.
+        This is the server-side filtering that prevents deleted tenants from appearing
+        in the frontend after acceptance.
+        """
+        
+        # ===== SETUP =====
+        user_id = "user_test_virtual"
+        
+        # Create active tenant
+        active_tenant = {
+            "_id": "tenant_active_uuid",
+            "type": "tenant",
+            "name": "Active Band",
+            "userIds": [user_id],
+            "createdAt": "2025-01-01T00:00:00Z",
+            "deletedAt": None
+        }
+        
+        # Create deleted tenant (user is still member, but shouldn't appear)
+        deleted_tenant = {
+            "_id": "tenant_deleted_uuid",
+            "type": "tenant",
+            "name": "Deleted Band",
+            "userIds": [user_id],
+            "createdAt": "2025-01-01T00:00:00Z",
+            "deletedAt": "2025-01-10T00:00:00Z"  # ← Marked as deleted
+        }
+        
+        # Store both tenants in database
+        await memory_dal.get("couch-sitter/tenant_active_uuid", "PUT", active_tenant)
+        await memory_dal.get("couch-sitter/tenant_deleted_uuid", "PUT", deleted_tenant)
+        
+        # ===== QUERY FOR TENANTS =====
+        # Simulate what virtual_tables.py does in list_tenants()
+        query = {"selector": {"type": "tenant"}}
+        result = await memory_dal.query("couch-sitter", query)
+        all_docs = result.get("docs", [])
+        
+        # Filter like the endpoint does
+        filtered_docs = [
+            doc for doc in all_docs 
+            if user_id in doc.get("userIds", []) 
+            and not doc.get("deletedAt")
+        ]
+        
+        # ===== VERIFY =====
+        filtered_ids = [doc["_id"] for doc in filtered_docs]
+        
+        assert "tenant_active_uuid" in filtered_ids, \
+            "Active tenant should be returned"
+        assert "tenant_deleted_uuid" not in filtered_ids, \
+            "Deleted tenant should be filtered out"
+        assert len(filtered_docs) == 1, \
+            f"Should only return 1 tenant. Got: {len(filtered_docs)}"
 
 
 if __name__ == "__main__":

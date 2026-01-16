@@ -129,7 +129,7 @@ class TenantService:
                     )
                     return {}
 
-                user_doc = await get_response.json()
+                user_doc = get_response.json()
 
                 # Update active_tenant_id
                 user_doc["active_tenant_id"] = tenant_id

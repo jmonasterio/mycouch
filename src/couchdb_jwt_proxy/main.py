@@ -5,6 +5,7 @@ import jwt
 import logging
 import base64
 import hashlib
+import asyncio
 from typing import Optional, Dict, Any, List
 from functools import lru_cache
 from jwt import PyJWKClient
@@ -494,11 +495,16 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
             return cached_info.tenant_id
 
         # Cache miss - fetch from couch-sitter database
-        requested_db_name = "couch-sitter"
+        # Extract database name from request path (e.g., "roady-staging/..." -> "roady-staging")
+        requested_db_name = None
         if request_path:
             parts = request_path.strip('/').split('/')
-            if parts:
+            if parts and parts[0]:
                 requested_db_name = parts[0]
+
+        # application_id is the database name from the request path
+        # This is trusted because it comes from the actual request URL
+        application_id = requested_db_name
 
         try:
             user_tenant_info = await couch_sitter_service.get_user_tenant_info(
@@ -522,6 +528,13 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
     sid = payload.get("sid")
     app_id = payload.get("iss")  # Clerk issuer (app identifier)
     user_name = payload.get("name") or payload.get("given_name")
+
+    # Determine applicationId from azp (authorized party) claim
+    azp = payload.get("azp", "")
+    if "localhost" in azp or "127.0.0.1" in azp:
+        application_id = "roady-staging"
+    else:
+        application_id = "roady"
 
     # ============================================================================
     # LEVEL 1: Session cache (per-device tenant)
@@ -561,8 +574,8 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
                     # Create/update session with this default
                     if sid and session_service:
                         try:
-                            await session_service.create_session(sid, sub_hash, user_default, app_id)
-                            logger.debug(f"[EXTRACT_TENANT] Cached session {sid} with tenant {user_default}")
+                            await session_service.create_session(sid, sub_hash, user_default, app_id, application_id)
+                            logger.debug(f"[EXTRACT_TENANT] Cached session {sid} with tenant {user_default} and app {application_id}")
                         except Exception as e:
                             logger.warning(f"[EXTRACT_TENANT] Failed to create session: {e}")
                     
@@ -602,10 +615,10 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
             
             if sid and session_service:
                 try:
-                    await session_service.create_session(sid, sub_hash, tenant_id, app_id)
+                    await session_service.create_session(sid, sub_hash, tenant_id, app_id, application_id)
                 except Exception as e:
                     logger.warning(f"[EXTRACT_TENANT] Failed to create session: {e}")
-            
+
             return tenant_id
         
         logger.debug(f"[EXTRACT_TENANT] Level 3 miss - user has no tenants")
@@ -646,7 +659,7 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
         # Create session
         if sid and session_service:
             try:
-                await session_service.create_session(sid, sub_hash, tenant_id, app_id)
+                await session_service.create_session(sid, sub_hash, tenant_id, app_id, application_id)
             except Exception as e:
                 logger.warning(f"[EXTRACT_TENANT] Failed to create session: {e}")
         
@@ -1104,33 +1117,58 @@ async def log_requests(request: Request, call_next):
         raise
 
 async def initialize_applications():
-    """Initialize applications from database - fail if database is not accessible"""
+    """Initialize applications from database - retry if database is not accessible"""
     global APPLICATIONS
 
     logger.info("🚀 Initializing applications from database...")
 
-    try:
-        # Load all applications from database
-        APPLICATIONS = await couch_sitter_service.load_all_apps()
-        logger.info(f"✅ Loaded {len(APPLICATIONS) if APPLICATIONS else 0} applications from database")
+    retry_count = 0
+    while True:
+        try:
+            # Load all applications from database
+            APPLICATIONS = await couch_sitter_service.load_all_apps()
 
-        if not APPLICATIONS:
-            logger.error("❌ No applications found in database!")
-            logger.error("   You need to create an application document in the couch-sitter database")
-            logger.error("   Format: {_id: 'app_<issuer>', type: 'application', issuer: '...', databaseNames: ['roady', 'couch-sitter'], clerkSecretKey: 'sk_...'}")
-            raise RuntimeError("No applications configured in database. Please add application documents to the couch-sitter database.")
+            # Check if we got applications - this is a config error, not a connection error
+            if not APPLICATIONS:
+                logger.error("❌ No applications found in database!")
+                logger.error("   You need to create an application document in the couch-sitter database")
+                logger.error("   Format: {_id: 'app_<issuer>', type: 'application', issuer: '...', databaseNames: ['roady', 'couch-sitter'], clerkSecretKey: 'sk_...'}")
+                raise RuntimeError("No applications configured in database. Please add application documents to the couch-sitter database.")
 
-        logger.info(f"📋 Registered application issuers:")
-        for issuer, app_config in APPLICATIONS.items():
-            logger.info(f"   - {issuer}")
-            logger.info(f"     Databases: {app_config.get('databaseNames', [])}")
-            has_secret = "✓" if app_config.get('clerkSecretKey') else "✗"
-            logger.info(f"     Secret key: {has_secret}")
+            logger.info(f"✅ Loaded {len(APPLICATIONS)} applications from database")
+            logger.info(f"📋 Registered application issuers:")
+            for issuer, app_config in APPLICATIONS.items():
+                logger.info(f"   - {issuer}")
+                logger.info(f"     Databases: {app_config.get('databaseNames', [])}")
+                has_secret = "✓" if app_config.get('clerkSecretKey') else "✗"
+                logger.info(f"     Secret key: {has_secret}")
 
-    except Exception as e:
-        logger.error(f"Failed to initialize applications from database: {e}")
-        logger.error("Application startup failed - database configuration is required")
-        raise RuntimeError(f"Cannot start without database configuration: {e}") from e
+            # Success - break out of retry loop
+            break
+
+        except httpx.ConnectError as e:
+            # Connection error - retry
+            retry_count += 1
+            logger.warning(f"⚠️  CouchDB not accessible at {COUCHDB_INTERNAL_URL} (attempt {retry_count})")
+            logger.warning(f"   Connection error: {e}")
+            logger.warning(f"   Retrying in 5 seconds...")
+            await asyncio.sleep(5)
+        except httpx.TimeoutException as e:
+            # Timeout - retry
+            retry_count += 1
+            logger.warning(f"⚠️  CouchDB timeout at {COUCHDB_INTERNAL_URL} (attempt {retry_count})")
+            logger.warning(f"   Timeout error: {e}")
+            logger.warning(f"   Retrying in 5 seconds...")
+            await asyncio.sleep(5)
+        except RuntimeError:
+            # Configuration error (no apps) - don't retry, fail immediately
+            raise
+        except Exception as e:
+            # Other errors - retry but show the error
+            retry_count += 1
+            logger.warning(f"⚠️  Failed to load applications (attempt {retry_count}): {e}")
+            logger.warning(f"   Retrying in 5 seconds...")
+            await asyncio.sleep(5)
 
 
 
@@ -1607,12 +1645,19 @@ async def update_user(user_id: str, request: Request, authorization: Optional[st
     requesting_user_id = payload.get("sub")
     if not requesting_user_id:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
-    
+
     issuer = payload.get("iss")
     sid = payload.get("sid")  # Clerk session ID for per-device tenant mapping
-    
+
+    # Determine applicationId from azp (authorized party) claim
+    azp = payload.get("azp", "")
+    if "localhost" in azp or "127.0.0.1" in azp:
+        application_id = "roady-staging"
+    else:
+        application_id = "roady"
+
     body = await request.json()
-    return await virtual_table_handler.update_user(user_id, requesting_user_id, body, issuer=issuer, sid=sid)
+    return await virtual_table_handler.update_user(user_id, requesting_user_id, body, issuer=issuer, sid=sid, application_id=application_id)
 
 @app.delete("/__users/{user_id}")
 async def delete_user(user_id: str, authorization: Optional[str] = Header(None)):
