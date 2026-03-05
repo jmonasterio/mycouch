@@ -1738,8 +1738,9 @@ async def proxy_couchdb(
     # CRITICAL: Prevent accidental database creation
     # Build allowed databases list dynamically from Application documents
     # Always include couch-sitter (admin database) and system databases
-    app_db = os.environ.get("APPLICATION_ID", "roady")
-    allowed_databases = {'couch-sitter', '_users', '_replicator', app_db}
+    # APPLICATION_ID may be comma-separated to allow multiple app databases (e.g. "roady,roady-staging")
+    app_dbs = {db.strip() for db in os.environ.get("APPLICATION_ID", "roady").split(",") if db.strip()}
+    allowed_databases = {'couch-sitter', '_users', '_replicator'} | app_dbs
     # Convert to list for error message
     allowed_databases_list = sorted(list(allowed_databases))
     
