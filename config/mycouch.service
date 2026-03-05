@@ -9,7 +9,8 @@ User=jm
 WorkingDirectory=/var/www/argw.com/mycouch
 Environment="PYTHONPATH=/var/www/argw.com/mycouch/src"
 Environment="PATH=/home/jm/.local/bin:/usr/local/bin:/usr/bin"
-ExecStart=/home/jm/.local/bin/uv run uvicorn couchdb_jwt_proxy.main:app --host 0.0.0.0 --port 5985
+ExecStartPre=/home/jm/.local/bin/uv sync --no-dev
+ExecStart=/var/www/argw.com/mycouch/.venv/bin/uvicorn couchdb_jwt_proxy.main:app --host 0.0.0.0 --port 5985
 Restart=always
 RestartSec=10
 StandardOutput=journal
