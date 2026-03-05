@@ -1241,12 +1241,18 @@ async def proxy_couchdb_streaming(
     """
     # Build CouchDB URL
     couchdb_url = f"{COUCHDB_INTERNAL_URL}/{db_name}/_changes"
-    query_string = str(request.url.query) if request.url.query else ""
-    
-    if query_string:
-        couchdb_url += f"?{query_string}"
-    
-    logger.info(f"Streaming _changes request to: {couchdb_url}")
+    # Parse the client's query string and inject tenant isolation via CouchDB's _selector filter.
+    # filter=_selector lets CouchDB apply a Mango selector server-side before streaming bytes.
+    from urllib.parse import parse_qs, urlencode, urlparse
+    qs_params = parse_qs(str(request.url.query), keep_blank_values=True)
+    if tenant_id:
+        qs_params["filter"] = ["_selector"]
+        import json as _json
+        qs_params["selector"] = [_json.dumps({TENANT_FIELD: tenant_id})]
+    encoded_qs = urlencode({k: v[0] for k, v in qs_params.items()})
+    if encoded_qs:
+        couchdb_url += f"?{encoded_qs}"
+    logger.info(f"Streaming _changes with tenant filter '{tenant_id}' to: {couchdb_url}")
     
     # Generator function that keeps the stream context alive
     async def stream_from_couchdb():
@@ -1955,6 +1961,21 @@ async def proxy_couchdb(
                 response_json = json.dumps(response_content).encode()
                 filtered_json = filter_changes_response(response_json, tenant_id)
                 response_content = json.loads(filtered_json)
+            elif endpoint_path == "_bulk_get" or path == "_bulk_get":
+                # Filter each result row — strip docs not belonging to the tenant.
+                results = response_content.get("results", [])
+                filtered_results = []
+                for row in results:
+                    filtered_docs = []
+                    for doc_entry in row.get("docs", []):
+                        doc = doc_entry.get("ok") or doc_entry.get("error") or {}
+                        doc_tenant = doc.get(TENANT_FIELD)
+                        # Allow _local/* and docs that match the tenant (or have no tenant field)
+                        if row.get("id", "").startswith("_local/") or doc_tenant is None or doc_tenant == tenant_id:
+                            filtered_docs.append(doc_entry)
+                    if filtered_docs:
+                        filtered_results.append({**row, "docs": filtered_docs})
+                response_content = {**response_content, "results": filtered_results}
         else:
             logger.debug(f"Skipping tenant filtering for couch-sitter app: {request.method} /{path}")
 
