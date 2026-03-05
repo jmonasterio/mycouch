@@ -1,7 +1,7 @@
 """
 Unit tests for Nostr NIP-98 HTTP Auth verification and session token management.
 
-Uses real secp256k1 key material generated with coincurve.
+Uses pure-Python secp256k1 signing (no native deps) for test key material.
 """
 import base64
 import hashlib
@@ -11,11 +11,18 @@ import os
 import time
 from unittest.mock import patch
 
-import coincurve
 import pytest
 
 from couchdb_jwt_proxy.core.auth import (
+    _Gx,
+    _Gy,
+    _N,
+    _P,
+    _lift_x,
+    _point_add,
+    _point_mul,
     _serialize_event,
+    _tagged_hash,
     issue_session_token,
     verify_nip98,
     verify_session_token,
@@ -23,12 +30,60 @@ from couchdb_jwt_proxy.core.auth import (
 
 
 # ---------------------------------------------------------------------------
+# Pure-Python BIP-340 signer (for tests only — not used in production)
+# ---------------------------------------------------------------------------
+
+def _sign_schnorr(privkey_bytes: bytes, msg: bytes) -> bytes:
+    """BIP-340 Schnorr signing with aux_rand = 0x00…00 (deterministic for tests)."""
+    d = int.from_bytes(privkey_bytes, "big")
+    if d == 0 or d >= _N:
+        raise ValueError("invalid private key")
+
+    P = _point_mul((_Gx, _Gy), d)
+    # Negate d if P.y is odd (even-y convention)
+    if P[1] % 2 != 0:
+        d = _N - d
+    P_x = P[0].to_bytes(32, "big")
+
+    aux = b"\x00" * 32
+    t = bytes(a ^ b for a, b in zip(privkey_bytes, _tagged_hash("BIP0340/aux", aux)))
+    k0 = int.from_bytes(_tagged_hash("BIP0340/nonce", t + P_x + msg), "big") % _N
+    if k0 == 0:
+        raise ValueError("nonce is zero")
+
+    R = _point_mul((_Gx, _Gy), k0)
+    k = k0 if R[1] % 2 == 0 else _N - k0
+    R_x = R[0].to_bytes(32, "big")
+
+    e = int.from_bytes(_tagged_hash("BIP0340/challenge", R_x + P_x + msg), "big") % _N
+    s = (k + e * d) % _N
+    return R_x + s.to_bytes(32, "big")
+
+
+class _PrivKey:
+    """Thin wrapper around a raw private key, mirroring the coincurve API."""
+
+    def __init__(self, privkey_bytes: bytes):
+        self._priv = privkey_bytes
+        d = int.from_bytes(privkey_bytes, "big")
+        P = _point_mul((_Gx, _Gy), d)
+        self._pubkey_hex = P[0].to_bytes(32, "big").hex()
+
+    @property
+    def public_key_xonly_hex(self) -> str:
+        return self._pubkey_hex
+
+    def sign_schnorr(self, msg: bytes) -> bytes:
+        return _sign_schnorr(self._priv, msg)
+
+
+# ---------------------------------------------------------------------------
 # Test fixtures — real key material
 # ---------------------------------------------------------------------------
 
 TEST_PRIVKEY_HEX = "b94f5374fce5edbc8e2a8697c15331677e6ebf0b262f70f82af3ef28e4ef9fc9"
-TEST_PRIVKEY = coincurve.PrivateKey(bytes.fromhex(TEST_PRIVKEY_HEX))
-TEST_PUBKEY_HEX = TEST_PRIVKEY.public_key_xonly.format().hex()
+TEST_PRIVKEY = _PrivKey(bytes.fromhex(TEST_PRIVKEY_HEX))
+TEST_PUBKEY_HEX = TEST_PRIVKEY.public_key_xonly_hex
 
 SESSION_SECRET = "test-secret-that-is-at-least-32-chars-long"
 
@@ -37,7 +92,7 @@ def make_nip98_event(
     url: str,
     method: str,
     body: bytes = b"",
-    privkey: coincurve.PrivateKey = TEST_PRIVKEY,
+    privkey: _PrivKey = None,
     created_at: int = None,
     override_kind: int = 27235,
     override_u: str = None,
@@ -45,7 +100,9 @@ def make_nip98_event(
     include_payload: bool = True,
 ) -> str:
     """Build a valid NIP-98 Authorization header."""
-    pubkey = privkey.public_key_xonly.format().hex()
+    if privkey is None:
+        privkey = TEST_PRIVKEY
+    pubkey = privkey.public_key_xonly_hex
     ts = created_at if created_at is not None else int(time.time())
 
     tags = [
@@ -99,11 +156,11 @@ class TestVerifyNip98Happy:
         assert result == TEST_PUBKEY_HEX
 
     def test_different_private_key(self):
-        sk2 = coincurve.PrivateKey(bytes.fromhex("a" * 64))
+        sk2 = _PrivKey(bytes.fromhex("a" * 64))
         url = "http://localhost:5985/test"
         auth = make_nip98_event(url, "GET", privkey=sk2)
         result = verify_nip98(auth, url, "GET")
-        assert result == sk2.public_key_xonly.format().hex()
+        assert result == sk2.public_key_xonly_hex
 
 
 # ---------------------------------------------------------------------------

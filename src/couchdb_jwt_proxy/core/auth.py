@@ -17,7 +17,63 @@ import os
 import time
 from typing import Any, Dict, Optional, Tuple
 
-import coincurve
+# Pure-Python BIP-340 secp256k1 Schnorr verification (no native deps)
+_P  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+_N  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_Gx = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+_Gy = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+
+
+def _point_add(P1, P2):
+    if P1 is None: return P2
+    if P2 is None: return P1
+    if P1[0] == P2[0] and P1[1] != P2[1]: return None
+    if P1 == P2:
+        lam = (3 * P1[0] * P1[0] * pow(2 * P1[1], _P - 2, _P)) % _P
+    else:
+        lam = ((P2[1] - P1[1]) * pow(P2[0] - P1[0], _P - 2, _P)) % _P
+    x3 = (lam * lam - P1[0] - P2[0]) % _P
+    return x3, (lam * (P1[0] - x3) - P1[1]) % _P
+
+
+def _point_mul(P, n):
+    R, Q = None, P
+    while n:
+        if n & 1: R = _point_add(R, Q)
+        Q = _point_add(Q, Q)
+        n >>= 1
+    return R
+
+
+def _lift_x(x):
+    if x >= _P: return None
+    y_sq = (pow(x, 3, _P) + 7) % _P
+    y = pow(y_sq, (_P + 1) // 4, _P)
+    if pow(y, 2, _P) != y_sq: return None
+    return x, (y if y % 2 == 0 else _P - y)
+
+
+def _tagged_hash(tag: str, msg: bytes) -> bytes:
+    h = hashlib.sha256(tag.encode()).digest()
+    return hashlib.sha256(h + h + msg).digest()
+
+
+def _verify_schnorr(pubkey_bytes: bytes, msg: bytes, sig_bytes: bytes) -> bool:
+    """BIP-340 Schnorr signature verification (pure Python, no native deps)."""
+    if len(pubkey_bytes) != 32 or len(sig_bytes) != 64 or len(msg) != 32:
+        return False
+    P = _lift_x(int.from_bytes(pubkey_bytes, 'big'))
+    if P is None:
+        return False
+    r = int.from_bytes(sig_bytes[:32], 'big')
+    s = int.from_bytes(sig_bytes[32:], 'big')
+    if r >= _P or s >= _N:
+        return False
+    e = int.from_bytes(
+        _tagged_hash('BIP0340/challenge', sig_bytes[:32] + pubkey_bytes + msg), 'big'
+    ) % _N
+    R = _point_add(_point_mul((_Gx, _Gy), s), _point_mul(P, _N - e))
+    return R is not None and R[1] % 2 == 0 and R[0] == r
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
@@ -123,8 +179,7 @@ def verify_nip98(
         pubkey_bytes = bytes.fromhex(pubkey)
         sig_bytes = bytes.fromhex(sig_hex)
         event_id_bytes = bytes.fromhex(expected_id)
-        pk = coincurve.PublicKeyXOnly(pubkey_bytes)
-        valid = pk.verify(sig_bytes, event_id_bytes)
+        valid = _verify_schnorr(pubkey_bytes, event_id_bytes, sig_bytes)
     except Exception as e:
         logger.warning(f"NIP-98 signature verification error: {e}")
         raise HTTPException(status_code=401, detail="Invalid NIP-98 token: signature verification failed")

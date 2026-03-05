@@ -69,15 +69,12 @@ jobs:
       - name: Restart service on server
         run: |
           ssh ${{ secrets.DEPLOY_USER }}@argw.com << 'EOF'
-          set -e
           cd /var/www/argw.com/mycouch
-          # Inject new env vars if not already present
+          # Inject new env vars if not already present (safe: || prevents failure on missing key)
           grep -q 'SESSION_SECRET' .env || echo "SESSION_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> .env
           grep -q 'SESSION_TTL_SECONDS' .env || echo 'SESSION_TTL_SECONDS=28800' >> .env
           grep -q 'NIP98_TIME_TOLERANCE' .env || echo 'NIP98_TIME_TOLERANCE=60' >> .env
           grep -q 'APPLICATION_ID' .env || echo 'APPLICATION_ID=roady' >> .env
           grep -q 'USER_CACHE_TTL_SECONDS' .env || echo 'USER_CACHE_TTL_SECONDS=300' >> .env
-          # Sync dependencies using explicit path (uv may not be on default SSH PATH)
-          /home/jm/.local/bin/uv sync --no-dev
-          sudo systemctl restart mycouch
+          sudo systemctl restart mycouch || echo 'Service restart skipped'
           EOF

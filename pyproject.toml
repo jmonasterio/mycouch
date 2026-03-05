@@ -14,7 +14,6 @@ dependencies = [
     "uvicorn",
     "httpx>=0.24.0",           # async HTTP client (used by DAL, tests, starlette TestClient)
     "python-dotenv",           # .env loading
-    "coincurve",               # secp256k1 Schnorr for Nostr NIP-98 verification
     "slowapi>=0.1.5",          # Rate limiting
 ]
 
