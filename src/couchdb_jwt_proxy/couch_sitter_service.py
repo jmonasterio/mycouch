@@ -125,24 +125,24 @@ class CouchSitterService:
             response.raise_for_status()
             return response
 
-    def _hash_sub(self, sub: str) -> str:
+    def _hash_pubkey(self, pubkey: str) -> str:
         """
-        Create SHA256 hash of the Clerk sub claim.
+        Create SHA256 hash of the Nostr pubkey.
 
         Args:
-            sub: Clerk sub claim
+            pubkey: Nostr public key (hex)
 
         Returns:
             SHA256 hash as hex string
         """
-        return hashlib.sha256(sub.encode('utf-8')).hexdigest()
+        return hashlib.sha256(pubkey.encode('utf-8')).hexdigest()
 
     async def find_user_by_sub_hash(self, sub_hash: str) -> Optional[Dict[str, Any]]:
         """
         Find a user document by the hash of their sub claim.
 
         Args:
-            sub_hash: SHA256 hash of the Clerk sub claim
+            sub_hash: SHA256 hash of the Nostr pubkey
 
         Returns:
             User document dict if found, None otherwise
@@ -227,7 +227,7 @@ class CouchSitterService:
         Creates a user and their personal tenant.
 
         Args:
-            sub: Clerk sub claim
+            sub: Nostr pubkey
             email: User email (optional)
             name: User name (optional)
             requested_db_name: The database name the user is accessing
@@ -238,9 +238,9 @@ class CouchSitterService:
         Raises:
             httpx.HTTPError: If database operations fail
         """
-        sub_hash = self._hash_sub(sub)
+        sub_hash = self._hash_pubkey(sub)
         user_id = f"user_{sub_hash}"
-        tenant_id = f"tenant_{self._hash_sub(sub)[:12]}"
+        tenant_id = f"tenant_{self._hash_pubkey(sub)[:12]}"
         current_time = datetime.now(timezone.utc).isoformat()
         
         # Use requested DB name for applicationId, or default to couch-sitter DB name
@@ -546,7 +546,7 @@ class CouchSitterService:
         instead of getting their own personal tenant.
 
         Args:
-            sub: Clerk sub claim
+            sub: Nostr pubkey
             email: User email (optional)
             name: User name (optional)
             requested_db_name: The database name the user is accessing
@@ -557,7 +557,7 @@ class CouchSitterService:
         Raises:
             httpx.HTTPError: If database operations fail
         """
-        sub_hash = self._hash_sub(sub)
+        sub_hash = self._hash_pubkey(sub)
         
         # Use requested DB name or default to couch-sitter DB name
         app_id = requested_db_name or self.db_name
@@ -800,14 +800,13 @@ class CouchSitterService:
                 logger.error(f"Created tenant: {created_tenant}")
                 raise
 
-    async def ensure_app_exists(self, issuer: str, database_names: List[str], clerk_secret_key: str = None) -> Dict[str, Any]:
+    async def ensure_app_exists(self, issuer: str, database_names: List[str]) -> Dict[str, Any]:
         """
         Ensure an App document exists for the given issuer, creating it if necessary.
 
         Args:
-            issuer: The Clerk issuer URL
+            issuer: The issuer identifier
             database_names: List of database names this issuer can access
-            clerk_secret_key: Clerk Secret Key for this app (optional)
 
         Returns:
             App document
@@ -832,25 +831,14 @@ class CouchSitterService:
             }
         }
 
-        # Add keys if provided
-        if clerk_secret_key:
-            app_doc["clerkSecretKey"] = clerk_secret_key
-
-
         try:
             # Try to get existing app
             response = await self._make_request("GET", app_id)
-            response.raise_for_status()  # This will raise for 404 responses
+            response.raise_for_status()
             existing_app = response.json()
-            
-            # Check if we need to update keys
-            needs_update = False
-            if clerk_secret_key and existing_app.get("clerkSecretKey") != clerk_secret_key:
-                existing_app["clerkSecretKey"] = clerk_secret_key
-                needs_update = True
 
-            
-            # Also update database names if changed
+            # Update database names if changed
+            needs_update = False
             if set(existing_app.get("databaseNames", [])) != set(database_names):
                 existing_app["databaseNames"] = database_names
                 needs_update = True
@@ -860,17 +848,15 @@ class CouchSitterService:
                 await self._make_request("PUT", app_id, json=existing_app)
                 logger.info(f"Updated app document: {app_id}")
                 return existing_app
-            
+
             logger.info(f"App document already exists and is up to date: {app_id}")
             return existing_app
-            
+
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 # Create new app document
-                response = await self._make_request("PUT", app_id, json=app_doc)
-                created_app = response.json()
+                await self._make_request("PUT", app_id, json=app_doc)
                 logger.info(f"Created app document: {app_id} for issuer: {issuer}")
-                # Return the app document we created, not just the DAL response
                 return app_doc
             else:
                 raise
@@ -884,7 +870,6 @@ class CouchSitterService:
             {
                 "issuer_url": {
                     "databaseNames": ["db1", "db2"],
-                    "clerkSecretKey": "sk_..."
                 }
             }
 
@@ -892,8 +877,6 @@ class CouchSitterService:
             httpx.HTTPError: If database operations fail
         """
         try:
-            # Use couchdb query to find all app documents
-            # Support both new "application" type and legacy "app" type
             query = {
                 "selector": {
                     "$or": [
@@ -901,7 +884,7 @@ class CouchSitterService:
                         {"type": "app"}
                     ]
                 },
-                "fields": ["issuer", "clerkIssuerId", "databaseNames", "databaseName", "name", "clerkSecretKey", "deletedAt"]
+                "fields": ["issuer", "databaseNames", "databaseName", "name", "deletedAt"]
             }
 
             response = await self._make_request("POST", "_find", json=query)
@@ -911,26 +894,17 @@ class CouchSitterService:
             for doc in result.get("docs", []):
                 doc_id = doc.get("_id", "unknown")
                 logger.debug(f"[APPS] Processing doc: {doc_id}")
-                logger.debug(f"[APPS]   deletedAt: {doc.get('deletedAt')}")
-                logger.debug(f"[APPS]   type: {doc.get('type')}")
-                logger.debug(f"[APPS]   issuer: {doc.get('issuer')}")
-                logger.debug(f"[APPS]   clerkSecretKey: {'YES' if doc.get('clerkSecretKey') else 'NO'}")
-                
+
                 # Skip deleted documents
                 if doc.get("deletedAt"):
                     logger.debug(f"[APPS]   → SKIPPED (deletedAt set)")
                     continue
-                    
-                issuer = doc.get("issuer") or doc.get("clerkIssuerId")
+
+                issuer = doc.get("issuer")
                 database_names = doc.get("databaseNames") or ([doc.get("databaseName")] if doc.get("databaseName") else [])
                 if issuer and database_names:
-                    apps[issuer] = {
-                        "databaseNames": database_names,
-                        "clerkSecretKey": doc.get("clerkSecretKey")
-                    }
-                    # Log loaded app (masking secret key)
-                    has_key = "Yes" if doc.get("clerkSecretKey") else "No"
-                    logger.info(f"[APPS] ✓ Loaded app: {issuer} -> DBs: {database_names}, Has Key: {has_key}")
+                    apps[issuer] = {"databaseNames": database_names}
+                    logger.info(f"[APPS] ✓ Loaded app: {issuer} -> DBs: {database_names}")
                 else:
                     logger.debug(f"[APPS]   → SKIPPED (missing issuer or databaseNames)")
 
@@ -948,7 +922,7 @@ class CouchSitterService:
         This is the main entry point for the JWT proxy to get tenant information.
 
         Args:
-            sub: Clerk sub claim from JWT
+            sub: Nostr pubkey from JWT
             email: User email from JWT (optional)
             name: User name from JWT (optional)
             requested_db_name: The database name the user is accessing
@@ -970,7 +944,7 @@ class CouchSitterService:
         Get all tenants for a user.
 
         Args:
-            sub: Clerk sub claim
+            sub: Nostr pubkey
 
         Returns:
             Tuple of (list of tenant dicts with metadata, personal_tenant_id)
@@ -979,7 +953,7 @@ class CouchSitterService:
             ValueError: If user not found
             httpx.HTTPError: If database operations fail
         """
-        sub_hash = self._hash_sub(sub)
+        sub_hash = self._hash_pubkey(sub)
         user_doc = await self.find_user_by_sub_hash(sub_hash)
 
         if not user_doc:
@@ -1019,7 +993,7 @@ class CouchSitterService:
         Create a new user and their personal tenant using the new multi-tenant schema.
 
         Args:
-            sub: Clerk sub claim
+            sub: Nostr pubkey
             email: User email (optional)
             name: User name (optional)
             requested_db_name: The database name the user is accessing
@@ -1030,7 +1004,7 @@ class CouchSitterService:
         Raises:
             httpx.HTTPError: If database operations fail
         """
-        sub_hash = self._hash_sub(sub)
+        sub_hash = self._hash_pubkey(sub)
         user_id = f"user_{sub_hash}"
         tenant_id = f"tenant_{uuid.uuid4()}"
         current_time = datetime.now(timezone.utc).isoformat()
@@ -1111,7 +1085,7 @@ class CouchSitterService:
         Args:
             user_doc: Existing user document with old schema
             tenant_id: Personal tenant ID
-            sub: Clerk sub claim
+            sub: Nostr pubkey
             email: User email (optional)
             name: User name (optional)
 

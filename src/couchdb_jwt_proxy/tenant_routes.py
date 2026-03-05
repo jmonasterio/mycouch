@@ -4,6 +4,7 @@ API Routes for Tenant and Invitation Management
 Provides endpoints for creating/managing workspaces and invitations.
 """
 
+import os
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from typing import Optional, Dict, Any, List
 import logging
@@ -53,16 +54,8 @@ def create_tenant_router(couch_sitter_service, invite_service):
             email = current_user.get("email")
             name_from_jwt = current_user.get("name")
 
-            # Determine applicationId from JWT's azp (authorized party) claim
-            # azp tells us where the request came from (trusted, signed in JWT)
-            # localhost → roady-staging, production → roady
-            azp = current_user.get("azp", "")
-            if "localhost" in azp or "127.0.0.1" in azp:
-                app_id = "roady-staging"
-                logger.info(f"Using roady-staging based on azp: {azp}")
-            else:
-                app_id = "roady"
-                logger.info(f"Using roady based on azp: {azp}")
+            # Determine applicationId from APPLICATION_ID env var
+            app_id = os.environ.get("APPLICATION_ID", "roady")
 
             logger.info(f"Creating tenant with applicationId: {app_id}")
             

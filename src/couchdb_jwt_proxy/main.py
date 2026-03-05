@@ -1,20 +1,14 @@
 import os
 import json
 import httpx
-import jwt
 import logging
 import base64
 import hashlib
 import asyncio
 from typing import Optional, Dict, Any, List
 from functools import lru_cache
-from jwt import PyJWKClient
 
 
-def _normalize_clerk_sub_to_user_id(sub: str) -> str:
-    """Convert Clerk sub claim to internal user ID format (user_<hash>)"""
-    sub_hash = hashlib.sha256(sub.encode('utf-8')).hexdigest()
-    return f"user_{sub_hash}"
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header, Request, Body
@@ -30,7 +24,6 @@ from urllib.parse import parse_qsl
 # Import user/tenant management modules
 from .user_tenant_cache import get_cache
 from .couch_sitter_service import CouchSitterService, ADMIN_TENANT_ID
-from .clerk_service import ClerkService
 from .dal import create_dal
 from .auth_log_service import AuthLogService
 from .invite_service import InviteService
@@ -42,6 +35,7 @@ from .bootstrap import BootstrapManager
 from .index_bootstrap import IndexBootstrap
 from .tenant_service import TenantService
 from . import auth_middleware
+from .core.auth import verify_session_token, verify_nip98, issue_session_token
 from .tenant_validation import validate_tenant_id_format, TenantIdFormatError, validate_user_id_format, UserIdFormatError
 
 # Load environment variables
@@ -56,28 +50,6 @@ PROXY_PORT = os.getenv("PROXY_PORT")
 LOG_LEVEL = os.getenv("LOG_LEVEL")
 COUCH_SITTER_LOG_DB_URL = os.getenv("COUCH_SITTER_LOG_DB_URL")
 
-# Default application configuration (will be loaded from database at startup)
-APPLICATIONS: Dict[str, Dict[str, Any]] = {}
-
-# NOTE: DEFAULT_APPLICATIONS has been removed. All application configuration
-# must come from the database. Add application documents to the couch-sitter
-# database with the following structure:
-# {
-#   "_id": "app_<issuer>",
-#   "type": "application",
-#   "issuer": "https://your-clerk-instance.clerk.accounts.dev",
-#   "databaseNames": ["roady", "roady-staging", "couch-sitter"],
-#   "clerkSecretKey": "sk_...",
-#   "createdAt": "...",
-#   "updatedAt": "..."
-# }
-
-# Clerk configuration (for RS256 JWT validation)
-CLERK_ISSUER_URL = os.getenv("CLERK_ISSUER_URL")
-
-# Clerk Backend API configuration (for session metadata management)
-CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
-
 # ... (imports and other setup)
 
 # ... (imports and other setup)
@@ -87,6 +59,11 @@ TENANT_FIELD = os.getenv("TENANT_FIELD")
 
 # Couch-sitter database configuration for user/tenant management
 COUCH_SITTER_DB_URL = os.getenv("COUCH_SITTER_DB_URL")
+SESSION_SECRET = os.getenv("SESSION_SECRET")
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", str(8 * 3600)))
+NIP98_TIME_TOLERANCE = int(os.getenv("NIP98_TIME_TOLERANCE", "60"))
+APPLICATION_ID = os.getenv("APPLICATION_ID", "roady")
+
 USER_CACHE_TTL_SECONDS = os.getenv("USER_CACHE_TTL_SECONDS")
 
 # Allowed CouchDB endpoints for PouchDB
@@ -106,10 +83,6 @@ ALLOWED_ENDPOINTS = {
 # Validation: Ensure required configuration is set
 missing_vars = []
 
-# CLERK_ISSUER_URL is optional - can come from app config in couch-sitter
-# if not CLERK_ISSUER_URL:
-#     missing_vars.append("CLERK_ISSUER_URL")
-
 if not COUCHDB_INTERNAL_URL:
     missing_vars.append("COUCHDB_INTERNAL_URL")
 
@@ -127,10 +100,6 @@ if not PROXY_PORT:
 
 if not LOG_LEVEL:
     missing_vars.append("LOG_LEVEL")
-
-# CLERK_SECRET_KEY is now optional - comes from app config in couch-sitter
-# if not CLERK_SECRET_KEY:
-#     missing_vars.append("CLERK_SECRET_KEY")
 
 if not TENANT_FIELD:
     missing_vars.append("TENANT_FIELD")
@@ -156,12 +125,6 @@ except ValueError:
     raise ValueError("USER_CACHE_TTL_SECONDS must be a valid integer. Configure this in your .env file.")
 
 # Clean up URLs after validation
-if CLERK_ISSUER_URL:
-    CLERK_ISSUER_URL = CLERK_ISSUER_URL.rstrip("/")
-    CLERK_JWKS_URL = f"{CLERK_ISSUER_URL}/.well-known/jwks.json"
-else:
-    CLERK_JWKS_URL = None
-
 COUCH_SITTER_DB_URL = COUCH_SITTER_DB_URL.rstrip("/")
 
 # Setup logging with timing
@@ -198,15 +161,6 @@ invite_service = InviteService(
     dal=dal
 )
 
-# Initialize Clerk Backend API service
-clerk_service = ClerkService(
-    secret_key=CLERK_SECRET_KEY,
-    issuer_url=CLERK_ISSUER_URL
-)
-
-# Set clerk_service for auth_middleware
-auth_middleware.set_clerk_service(clerk_service)
-
 # Initialize Session Service (for per-device/per-session tenant mapping)
 session_service = SessionService(dal)
 logger.info("✓ Initialized session service")
@@ -216,7 +170,7 @@ cleanup_service = CleanupService(dal, cleanup_interval_hours=24)
 logger.info("✓ Initialized cleanup service")
 
 # Initialize Virtual Tables and Bootstrap managers
-virtual_table_handler = VirtualTableHandler(dal, clerk_service, APPLICATIONS, session_service)
+virtual_table_handler = VirtualTableHandler(dal, None, {}, session_service)
 bootstrap_manager = BootstrapManager(dal)
 logger.info("✓ Initialized virtual tables and bootstrap managers")
 
@@ -235,10 +189,6 @@ else:
 
 logger.info(f"Initialized user cache (TTL: {USER_CACHE_TTL_SECONDS}s)")
 logger.info(f"Initialized CouchSitter service for: {COUCH_SITTER_DB_URL}")
-if clerk_service.is_configured():
-    logger.info("Initialized Clerk Backend API service")
-else:
-    logger.warning("Clerk Backend API service not configured - session metadata features disabled")
 
 # JWT Functions
 def get_token_preview(token: str) -> str:
@@ -263,161 +213,6 @@ def decode_token_unsafe(token: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-# Clerk JWT validation (RS256)
-# Import local JWKS cache support
-from .jwks_cache import load_jwks_from_cache
-from .local_jwks_client import LocalJWKClient
-
-# Cache for JWKS clients (both local and remote)
-_jwks_clients: Dict[str, Any] = {}
-
-def get_clerk_jwks_client(issuer: str) -> Optional[Any]:
-    """
-    Get JWKS client for Clerk token validation.
-
-    Tries local cache first (to avoid outbound network calls that may be blocked
-    by security software like CrowdStrike), falls back to network fetch.
-    """
-    logger.info(f"[JWKS] get_clerk_jwks_client called for: {issuer}")
-
-    if not issuer:
-        return None
-
-    # Check if already cached
-    if issuer in _jwks_clients:
-        logger.info(f"[JWKS] Using memory-cached client for: {issuer}")
-        return _jwks_clients[issuer]
-
-    # Try local cache first
-    logger.info(f"[JWKS] Checking local file cache for: {issuer}")
-    jwks_data = load_jwks_from_cache(issuer)
-    logger.info(f"[JWKS] Local cache result: {jwks_data is not None}")
-    if jwks_data:
-        try:
-            client = LocalJWKClient(jwks_data)
-            _jwks_clients[issuer] = client
-            logger.info(f"✓ Using LOCAL JWKS cache for: {issuer}")
-            return client
-        except Exception as e:
-            logger.warning(f"Failed to load local JWKS for {issuer}: {e}")
-
-    # Fall back to network fetch
-    jwks_url = f"{issuer.rstrip('/')}/.well-known/jwks.json"
-    logger.warning(f"[JWKS] ⚠️ FALLING BACK TO NETWORK FETCH: {jwks_url}")
-
-    try:
-        client = PyJWKClient(jwks_url, cache_keys=True)
-        _jwks_clients[issuer] = client
-        logger.warning(f"[JWKS] ⚠️ Network fetch completed: {jwks_url}")
-        return client
-    except Exception as e:
-        logger.error(f"Failed to initialize Clerk JWKS client for {issuer}: {e}")
-        return None
-
-def verify_clerk_jwt(token: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Verify Clerk JWT token (RS256). Returns (payload, error_reason)
-    
-    Note: Set SKIP_JWT_EXPIRATION_CHECK=true in .env to skip expiration validation (dev/testing only)
-    """
-    try:
-        # 1. Extract issuer from unverified token
-        unverified_payload = decode_token_unsafe(token)
-        if not unverified_payload:
-             logger.error(f"JWT verification failed: invalid_token_format")
-             return None, "invalid_token_format"
-             
-        issuer = unverified_payload.get("iss")
-        if not issuer:
-            logger.error(f"JWT verification failed: missing_issuer_claim")
-            return None, "missing_issuer_claim"
-            
-        # 2. Validate issuer is registered
-        # Note: APPLICATIONS keys are issuers
-        logger.debug(f"JWT issuer: {issuer}")
-        logger.debug(f"Registered applications: {list(APPLICATIONS.keys())}")
-        
-        if issuer not in APPLICATIONS:
-             logger.warning(f"JWT verification FAILED - Unknown issuer: {issuer}")
-             logger.warning(f"  Registered issuers: {list(APPLICATIONS.keys())}")
-             logger.warning(f"  Sub in token: {unverified_payload.get('sub')}")
-             return None, "unknown_issuer"
-
-        # 3. Get JWKS client for this issuer
-        jwks_client = get_clerk_jwks_client(issuer)
-        if not jwks_client:
-            logger.error(f"JWKS client unavailable for issuer: {issuer}")
-            return None, "clerk_jwks_unavailable"
-
-        logger.debug(f"Attempting to validate JWT with JWKS from issuer: {issuer}")
-
-        # Get signing key
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
-
-        # Verify token with Clerk's public key
-        # Check if expiration validation should be skipped (for dev/testing)
-        skip_exp_check = os.getenv("SKIP_JWT_EXPIRATION_CHECK", "false").lower() == "true"
-        
-        payload = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256"],
-            audience=None,  # Clerk JWTs don't have audience claim by default
-            issuer=issuer,  # Verify issuer matches
-            options={
-                "verify_aud": False,
-                "verify_iss": True,
-                "verify_exp": not skip_exp_check,  # Skip expiration check if configured
-                "leeway": 300  # Allow 5 minutes of clock skew (increased from 60s to handle larger drifts)
-            }
-        )
-        
-        if skip_exp_check:
-            logger.warning("⚠️ JWT expiration check DISABLED - development/testing mode only")
-
-        logger.debug(f"Clerk JWT validated successfully")
-        return payload, None
-
-    except jwt.ExpiredSignatureError as e:
-        # Log timing details for debugging
-        try:
-            import time
-            unverified = decode_token_unsafe(token)
-            if unverified:
-                exp = unverified.get('exp', 'N/A')
-                iat = unverified.get('iat', 'N/A')
-                nbf = unverified.get('nbf', 'N/A')
-                now = int(time.time())
-                logger.warning(f"JWT token expired. Now: {now}, IAT: {iat}, NBF: {nbf}, EXP: {exp}")
-                if isinstance(exp, int):
-                    logger.warning(f"Token expired {now - exp} seconds ago")
-        except Exception:
-            pass
-        logger.warning(f"JWT token has expired: {e}")
-        return None, "clerk_token_expired"
-    except jwt.ImmatureSignatureError as e:
-        # Log timing details for debugging
-        try:
-            import time
-            unverified = decode_token_unsafe(token)
-            if unverified:
-                nbf = unverified.get('nbf', 'N/A')
-                iat = unverified.get('iat', 'N/A')
-                now = int(time.time())
-                logger.warning(f"JWT not valid yet (ImmatureSignatureError). Now: {now}, IAT: {iat}, NBF: {nbf}")
-                if isinstance(nbf, int):
-                    logger.warning(f"Token will be valid in {nbf - now} seconds")
-                    logger.warning(f"This indicates a {nbf - now}s clock skew between client and server")
-        except Exception:
-            pass
-        logger.warning(f"JWT token not yet valid (ImmatureSignatureError): {e}")
-        return None, f"clerk_invalid_token (ImmatureSignatureError)"
-    except jwt.InvalidTokenError as e:
-        logger.warning(f"Invalid JWT token: {type(e).__name__} - {e}")
-        return None, f"clerk_invalid_token ({type(e).__name__})"
-    except Exception as e:
-        logger.error(f"JWT validation error: {type(e).__name__} - {e}")
-        logger.error(f"JWKS URL: {CLERK_JWKS_URL}")
-        return None, f"clerk_token_error ({type(e).__name__})"
 
 def is_couch_sitter_app(payload: Dict[str, Any], request_path: str = None) -> bool:
     """
@@ -433,14 +228,9 @@ def is_couch_sitter_app(payload: Dict[str, Any], request_path: str = None) -> bo
     issuer = payload.get("iss", "")
     
     # Check issuer against registered applications (primary check)
-    if issuer in APPLICATIONS:
-        app_config = APPLICATIONS[issuer]
-        dbs = []
-        if isinstance(app_config, dict):
-            dbs = app_config.get("databaseNames", [])
-        elif isinstance(app_config, list):
-            dbs = app_config
-        return "couch-sitter" in dbs
+    # No APPLICATIONS dict — determine from APPLICATION_ID env var
+    app_id = os.getenv("APPLICATION_ID", "roady")
+    return app_id == "couch-sitter"
     
     # Fallback: check request path if issuer not registered
     if request_path and ("couch-sitter" in request_path.lower() or "couch_sitter" in request_path.lower()):
@@ -526,15 +316,10 @@ async def extract_tenant(payload: Dict[str, Any], request_path: str = None) -> s
     logger.debug(f"[EXTRACT_TENANT] Multi-tenant request - starting 5-level discovery")
 
     sid = payload.get("sid")
-    app_id = payload.get("iss")  # Clerk issuer (app identifier)
     user_name = payload.get("name") or payload.get("given_name")
 
-    # Determine applicationId from azp (authorized party) claim
-    azp = payload.get("azp", "")
-    if "localhost" in azp or "127.0.0.1" in azp:
-        application_id = "roady-staging"
-    else:
-        application_id = "roady"
+    # application_id from env var
+    application_id = os.getenv("APPLICATION_ID", "roady")
 
     # ============================================================================
     # LEVEL 1: Session cache (per-device tenant)
@@ -984,11 +769,6 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning(f"⚠ No CouchDB credentials configured")
 
-    # JWT configuration
-    logger.info(f"✓ Clerk JWT validation ENABLED")
-    logger.info(f"  Clerk issuer: {CLERK_ISSUER_URL}")
-    logger.info(f"  JWKS URL: {CLERK_JWKS_URL}")
-
     # Tenant mode (always enabled)
     logger.info(f"✓ Tenant mode ENABLED (always)")
     logger.info(f"  Tenant field: {TENANT_FIELD}")
@@ -1117,200 +897,35 @@ async def log_requests(request: Request, call_next):
         raise
 
 async def initialize_applications():
-    """Initialize applications from database - retry if database is not accessible"""
-    global APPLICATIONS
-
-    logger.info("🚀 Initializing applications from database...")
-
-    retry_count = 0
-    while True:
-        try:
-            # Load all applications from database
-            APPLICATIONS = await couch_sitter_service.load_all_apps()
-
-            # Check if we got applications - this is a config error, not a connection error
-            if not APPLICATIONS:
-                logger.error("❌ No applications found in database!")
-                logger.error("   You need to create an application document in the couch-sitter database")
-                logger.error("   Format: {_id: 'app_<issuer>', type: 'application', issuer: '...', databaseNames: ['roady', 'couch-sitter'], clerkSecretKey: 'sk_...'}")
-                raise RuntimeError("No applications configured in database. Please add application documents to the couch-sitter database.")
-
-            logger.info(f"✅ Loaded {len(APPLICATIONS)} applications from database")
-            logger.info(f"📋 Registered application issuers:")
-            for issuer, app_config in APPLICATIONS.items():
-                logger.info(f"   - {issuer}")
-                logger.info(f"     Databases: {app_config.get('databaseNames', [])}")
-                has_secret = "✓" if app_config.get('clerkSecretKey') else "✗"
-                logger.info(f"     Secret key: {has_secret}")
-
-            # Success - break out of retry loop
-            break
-
-        except httpx.ConnectError as e:
-            # Connection error - retry
-            retry_count += 1
-            logger.warning(f"⚠️  CouchDB not accessible at {COUCHDB_INTERNAL_URL} (attempt {retry_count})")
-            logger.warning(f"   Connection error: {e}")
-            logger.warning(f"   Retrying in 5 seconds...")
-            await asyncio.sleep(5)
-        except httpx.TimeoutException as e:
-            # Timeout - retry
-            retry_count += 1
-            logger.warning(f"⚠️  CouchDB timeout at {COUCHDB_INTERNAL_URL} (attempt {retry_count})")
-            logger.warning(f"   Timeout error: {e}")
-            logger.warning(f"   Retrying in 5 seconds...")
-            await asyncio.sleep(5)
-        except RuntimeError:
-            # Configuration error (no apps) - don't retry, fail immediately
-            raise
-        except Exception as e:
-            # Other errors - retry but show the error
-            retry_count += 1
-            logger.warning(f"⚠️  Failed to load applications (attempt {retry_count}): {e}")
-            logger.warning(f"   Retrying in 5 seconds...")
-            await asyncio.sleep(5)
-
-
-
-# Routes
-
-# Tenant Management Endpoints
-# NOTE: GET /my-tenants endpoint removed - use virtual endpoint /__tenants instead
-# POST /my-tenants endpoint removed - use virtual endpoint /__tenants instead
-# DELETE /my-tenant/{tenant_id} endpoint removed - use virtual endpoint /__tenants instead
-
-
-
-
-@app.post("/choose-tenant")
-@limiter.limit("10/minute")
-async def choose_tenant(
-    request: Request,
-    tenant_request: Dict[str, str] = Body(...),
-    authorization: Optional[str] = Header(None)
-):
-    """
-    Set the active tenant for the authenticated user.
-    This endpoint updates the user's session metadata with the chosen active tenant.
-    """
-    logger.info("[CHOOSE-TENANT] POST /choose-tenant called")
-    
-    if not authorization:
-        logger.warning("[CHOOSE-TENANT] Missing authorization header")
-        raise HTTPException(status_code=401, detail="Missing authorization header")
-
-    if not authorization.startswith("Bearer "):
-        logger.warning("[CHOOSE-TENANT] Invalid authorization header format")
-        raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-    token = authorization.split(" ", 1)[1]
-    logger.debug(f"[CHOOSE-TENANT] Got bearer token")
-
-    # Validate request body
-    if "tenantId" not in tenant_request:
-        logger.warning("[CHOOSE-TENANT] Missing tenantId in request body")
-        raise HTTPException(status_code=400, detail="Missing tenantId in request body")
-
-    tenant_id = tenant_request["tenantId"]
-    logger.info(f"[CHOOSE-TENANT] Request to set active tenant to: {tenant_id}")
-
-    try:
-        # Validate JWT and extract user information
-        logger.debug("[CHOOSE-TENANT] Extracting user info from JWT")
-        user_info = await clerk_service.get_user_from_jwt(token)
-        if not user_info:
-            logger.error("[CHOOSE-TENANT] Invalid JWT token")
-            raise HTTPException(status_code=401, detail="Invalid JWT token")
-        
-        logger.info(f"[CHOOSE-TENANT] User info from JWT: sub={user_info.get('sub')}, iss={user_info.get('iss')}")
-
-        # Get user's current tenant information
-        logger.debug("[CHOOSE-TENANT] Getting user tenant info from couch_sitter_service")
-        user_tenant_info = await couch_sitter_service.get_user_tenant_info(
-            sub=user_info["sub"],
-            email=user_info.get("email"),
-            name=user_info.get("name")
-        )
-        logger.debug(f"[CHOOSE-TENANT] Got user_tenant_info: user_id={user_tenant_info.user_id}")
-
-        # Get all accessible tenants for validation
-        logger.debug("[CHOOSE-TENANT] Getting accessible tenants for user")
-        tenants, personal_tenant_id = await couch_sitter_service.get_user_tenants(user_info["sub"])
-        accessible_tenant_ids = [t["tenantId"] for t in tenants]
-        logger.info(f"[CHOOSE-TENANT] User {user_info['sub']} has accessible tenants: {accessible_tenant_ids}")
-
-        # Verify the user has access to this tenant
-        if tenant_id not in accessible_tenant_ids:
-            logger.warning(f"[CHOOSE-TENANT] User {user_info['sub']} attempted to select inaccessible tenant: {tenant_id}")
-            logger.warning(f"[CHOOSE-TENANT] Accessible tenants: {accessible_tenant_ids}")
-            raise HTTPException(status_code=403, detail="Access denied: tenant not found")
-
-        # Note: Active tenant is now stored in session documents (per-device)
-        # No need to update Clerk metadata - session service handles it
-
-        logger.info(f"[CHOOSE-TENANT] Returning success response with tenant {tenant_id}")
-        return {
-            "success": True,
-            "message": "Active tenant updated successfully",
-            "activeTenantId": tenant_id,
-            "userId": user_tenant_info.user_id
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[CHOOSE-TENANT] Error choosing tenant: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to set active tenant")
+    """No-op: Nostr NIP-98 auth does not require APPLICATIONS dict."""
+    logger.info("NIP-98 auth active — no application issuer registration needed")
 
 @app.get("/active-tenant")
 async def get_active_tenant(
     request: Request,
     authorization: Optional[str] = Header(None)
 ):
-
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-    token = authorization.split(" ", 1)[1]
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
 
     try:
-        # Validate JWT and extract user information
-        user_info = await clerk_service.get_user_from_jwt(token)
-        if not user_info:
-            raise HTTPException(status_code=401, detail="Invalid JWT token")
+        payload = verify_session_token(authorization)
+        user_id = payload["user_id"]
+        pubkey = payload["pubkey"]
 
-        # Try to get active tenant from Clerk metadata first
-        active_tenant_id = None
-        if clerk_service.is_configured() and user_info.get("session_id"):
-            active_tenant_id = await clerk_service.get_user_active_tenant(
-                user_id=user_info["user_id"],
-                session_id=user_info["session_id"],
-                issuer=user_info.get("iss")
-            )
-
-        # Fallback: get personal tenant from database
-        if not active_tenant_id:
-            user_tenant_info = await couch_sitter_service.get_user_tenant_info(
-                sub=user_info["sub"],
-                email=user_info.get("email"),
-                name=user_info.get("name")
-            )
-            active_tenant_id = user_tenant_info.tenant_id
-            logger.debug(f"Using personal tenant as active tenant for user {user_info['user_id']}: {active_tenant_id}")
-        else:
-            logger.debug(f"Found active tenant in Clerk metadata for user {user_info['user_id']}: {active_tenant_id}")
+        active_tenant_id = await session_service.get_active_tenant(user_id)
 
         return {
             "activeTenantId": active_tenant_id,
-            "userId": user_info["user_id"],
-            "sub": user_info["sub"],
-            "isPersonalTenant": True  # For now, always personal tenant
+            "userId": user_id,
+            "sub": pubkey,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting active tenant: {e}")
         raise HTTPException(status_code=500, detail="Failed to get active tenant")
-
 # Public endpoints (must be defined before catch-all route)
 @app.get("/admin/auth-logs")
 async def get_auth_logs(
@@ -1349,10 +964,9 @@ async def get_auth_logs(
         # Verify JWT to ensure user is authenticated
         token = authorization[7:]
         jwt_start = time.time()
-        payload, error_reason = verify_clerk_jwt(token)
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
         logger.info(f"[auth-logs] JWT verification took {(time.time() - jwt_start)*1000:.0f}ms")
-        if not payload:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
         
         # TODO: Add admin role check once roles are implemented
         # For now, any authenticated user can view logs (consider restricting to admins)
@@ -1444,10 +1058,8 @@ async def get_auth_logs_stats(
     try:
         # Verify JWT to ensure user is authenticated
         token = authorization[7:]
-        payload, error_reason = verify_clerk_jwt(token)
-        if not payload:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
         # TODO: Add admin role check once roles are implemented
         
         # Calculate date range
@@ -1568,6 +1180,54 @@ async def root():
         }
     }
 
+
+# ============================================================
+# Nostr NIP-98 Session Auth
+# ============================================================
+
+@app.post("/auth/session")
+async def create_session(request: Request, authorization: Optional[str] = Header(None)):
+    """
+    Exchange a NIP-98 signed event for a session Bearer token.
+
+    The client signs a kind-27235 Nostr event scoped to this URL + POST,
+    base64-encodes it, and sends:  Authorization: Nostr <base64>
+    """
+    body = await request.body()
+    url = str(request.url)
+    pubkey = verify_nip98(authorization, url, "POST", body, NIP98_TIME_TOLERANCE)
+
+    # Ensure user exists (creates user + personal tenant on first login)
+    user_tenant_info = await couch_sitter_service.ensure_user_exists(
+        sub=pubkey,
+        email=None,
+        name=None,
+    )
+
+    token_data = issue_session_token(
+        pubkey=pubkey,
+        user_id=user_tenant_info.user_id,
+        ttl=SESSION_TTL_SECONDS,
+    )
+
+    logger.info(f"Session issued for pubkey {pubkey[:16]}... user_id={user_tenant_info.user_id}")
+    return {
+        "token": token_data["token"],
+        "pubkey": pubkey,
+        "expires_in": token_data["expires_in"],
+    }
+
+
+@app.delete("/auth/session")
+async def delete_session(authorization: Optional[str] = Header(None)):
+    """
+    Client signals logout. Stateless — no server-side revocation.
+    Returns 200 regardless; useful hook for future revocation list.
+    """
+    # Verify token is valid (don’t silently accept garbage)
+    verify_session_token(authorization)
+    return {"status": "logged_out"}
+
 async def proxy_couchdb_streaming(
     request: Request,
     path: str,
@@ -1621,9 +1281,11 @@ async def get_user(user_id: str, authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     requesting_user_id = payload.get("sub")
     if not requesting_user_id:
@@ -1638,23 +1300,21 @@ async def update_user(user_id: str, request: Request, authorization: Optional[st
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     requesting_user_id = payload.get("sub")
     if not requesting_user_id:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
 
     issuer = payload.get("iss")
-    sid = payload.get("sid")  # Clerk session ID for per-device tenant mapping
+    sid = payload.get("sid")
 
-    # Determine applicationId from azp (authorized party) claim
-    azp = payload.get("azp", "")
-    if "localhost" in azp or "127.0.0.1" in azp:
-        application_id = "roady-staging"
-    else:
-        application_id = "roady"
+    # application_id from env var
+    application_id = os.getenv("APPLICATION_ID", "roady")
 
     body = await request.json()
     return await virtual_table_handler.update_user(user_id, requesting_user_id, body, issuer=issuer, sid=sid, application_id=application_id)
@@ -1666,9 +1326,11 @@ async def delete_user(user_id: str, authorization: Optional[str] = Header(None))
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     requesting_user_id = payload.get("sub")
     if not requesting_user_id:
@@ -1683,9 +1345,11 @@ async def get_tenant(tenant_id: str, authorization: Optional[str] = Header(None)
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     requesting_user_id = payload.get("sub")
     if not requesting_user_id:
@@ -1708,16 +1372,18 @@ async def list_tenants(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     sub = payload.get("sub")
     if not sub:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
     # Normalize to internal user ID format
-    user_id = _normalize_clerk_sub_to_user_id(sub)
+    user_id = f"user_{hashlib.sha256(sub.encode()).hexdigest()}"
     try:
         validate_user_id_format(user_id)
     except UserIdFormatError as e:
@@ -1735,16 +1401,18 @@ async def create_tenant(request: Request, authorization: Optional[str] = Header(
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     sub = payload.get("sub")
     if not sub:
         raise HTTPException(status_code=400, detail="Missing 'sub' in JWT")
     
     # Normalize to internal user ID format
-    user_id = _normalize_clerk_sub_to_user_id(sub)
+    user_id = f"user_{hashlib.sha256(sub.encode()).hexdigest()}"
     try:
         validate_user_id_format(user_id)
     except UserIdFormatError as e:
@@ -1762,9 +1430,11 @@ async def update_tenant(tenant_id: str, request: Request, authorization: Optiona
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     sub = payload.get("sub")
     if not sub:
@@ -1778,7 +1448,7 @@ async def update_tenant(tenant_id: str, request: Request, authorization: Optiona
         raise HTTPException(status_code=400, detail=str(e))
     
     # Normalize to internal user ID format
-    user_id = _normalize_clerk_sub_to_user_id(sub)
+    user_id = f"user_{hashlib.sha256(sub.encode()).hexdigest()}"
     try:
         validate_user_id_format(user_id)
     except UserIdFormatError as e:
@@ -1795,9 +1465,11 @@ async def delete_tenant(tenant_id: str, authorization: Optional[str] = Header(No
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     sub = payload.get("sub")
     if not sub:
@@ -1811,7 +1483,7 @@ async def delete_tenant(tenant_id: str, authorization: Optional[str] = Header(No
         raise HTTPException(status_code=400, detail=str(e))
     
     # Normalize to internal user ID format
-    user_id = _normalize_clerk_sub_to_user_id(sub)
+    user_id = f"user_{hashlib.sha256(sub.encode()).hexdigest()}"
     try:
         validate_user_id_format(user_id)
     except UserIdFormatError as e:
@@ -1837,8 +1509,9 @@ async def user_changes(
     
     token = authorization[7:]
     logger.info(f"   Token length: {len(token)}")
-    payload, error_reason = verify_clerk_jwt(token)
-    
+    session_payload = verify_session_token(f"Bearer {token}")
+    payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+        
     if not payload:
         logger.error(f"❌ GET /__users/_changes - JWT verification failed: {error_reason}")
         logger.error(f"   Will raise 403 Forbidden")
@@ -1872,9 +1545,11 @@ async def user_bulk_docs(request: Request, authorization: Optional[str] = Header
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     requesting_user_id = payload.get("sub")
     if not requesting_user_id:
@@ -1900,8 +1575,9 @@ async def tenant_changes(
     
     token = authorization[7:]
     logger.info(f"   Token length: {len(token)}")
-    payload, error_reason = verify_clerk_jwt(token)
-    
+    session_payload = verify_session_token(f"Bearer {token}")
+    payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+        
     if not payload:
         logger.error(f"❌ GET /__tenants/_changes - JWT verification failed: {error_reason}")
         logger.error(f"   Will raise 403 Forbidden")
@@ -1935,9 +1611,11 @@ async def tenant_bulk_docs(request: Request, authorization: Optional[str] = Head
         raise HTTPException(status_code=401, detail="Missing authorization")
     
     token = authorization[7:]
-    payload, error_reason = verify_clerk_jwt(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail=f"Invalid token ({error_reason})")
+    try:
+        session_payload = verify_session_token(f"Bearer {token}")
+        payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     requesting_user_id = payload.get("sub")
     if not requesting_user_id:
@@ -1994,9 +1672,9 @@ async def proxy_couchdb(
     # Extract and validate JWT token
     if not authorization:
         logger.warning(f"401 - Missing Authorization header | Client: {request.client.host} | Path: {request.method} /{path}")
-        logger.warning("This typically means the user is not signed in with Clerk or the JWT is not being included in requests")
-        logger.warning("Please ensure the frontend is properly configured with Clerk authentication")
-        raise HTTPException(status_code=401, detail="Missing authorization header - please sign in with Clerk")
+        logger.warning("Missing Authorization header in request")
+
+        raise HTTPException(status_code=401, detail="Missing authorization header")
 
     # Parse Bearer token
     if not authorization.startswith("Bearer "):
@@ -2005,9 +1683,9 @@ async def proxy_couchdb(
 
     token = authorization[7:]  # Remove "Bearer " prefix
 
-    # Verify Clerk JWT
-    payload, error_reason = verify_clerk_jwt(token)
-
+    session_payload = verify_session_token(f"Bearer {token}")
+    payload = {"sub": session_payload["pubkey"], "user_id": session_payload["user_id"]}
+    
     if not payload:
         # Decode token without verification to log what's in it
         unverified = decode_token_unsafe(token)
@@ -2062,16 +1740,8 @@ async def proxy_couchdb(
     # CRITICAL: Prevent accidental database creation
     # Build allowed databases list dynamically from Application documents
     # Always include couch-sitter (admin database) and system databases
-    allowed_databases = {'couch-sitter', '_users', '_replicator'}
-    
-    # Add all databases from registered applications
-    for issuer, app_config in APPLICATIONS.items():
-        if isinstance(app_config, dict) and "databaseNames" in app_config:
-            allowed_databases.update(app_config["databaseNames"])
-        elif isinstance(app_config, list):
-            # Handle legacy format (list of strings) just in case
-            allowed_databases.update(app_config)
-    
+    app_db = os.environ.get("APPLICATION_ID", "roady")
+    allowed_databases = {'couch-sitter', '_users', '_replicator', app_db}
     # Convert to list for error message
     allowed_databases_list = sorted(list(allowed_databases))
     

@@ -130,6 +130,10 @@ class IndexBootstrap:
                 "index": {"fields": ["userIds"]},
                 "name": "userIds",
             },
+            {
+                "index": {"fields": ["created_at"]},
+                "name": "created-at",
+            },
         ]
 
         logger.info("📦 Creating indexes on 'couch-sitter'...")

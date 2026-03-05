@@ -45,19 +45,17 @@ class TestAuthEndpointRateLimits:
     """Test that auth endpoints have rate limits configured"""
     
     def test_choose_tenant_has_rate_limit(self):
-        """Test that /choose-tenant has rate limiting decorator"""
+        """Test that /auth/session has rate limiting"""
         from src.couchdb_jwt_proxy.main import app
-        
-        # Find the choose_tenant route
-        choose_tenant_route = None
+
+        auth_session_route = None
         for route in app.routes:
-            if hasattr(route, 'path') and route.path == '/choose-tenant':
-                choose_tenant_route = route
+            if hasattr(route, 'path') and route.path == '/auth/session':
+                auth_session_route = route
                 break
-        
-        assert choose_tenant_route is not None
-        # Rate limit decorator should be applied to the endpoint
-        assert hasattr(choose_tenant_route, 'endpoint')
+
+        assert auth_session_route is not None
+        assert hasattr(auth_session_route, 'endpoint')
     
 
 

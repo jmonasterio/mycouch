@@ -1,6 +1,6 @@
 # Core shared modules for both FastAPI and stdlib servers
 from .config import Config, setup_logging
-from .auth import verify_jwt, decode_token_unsafe, get_jwks_client, extract_bearer_token
+from .auth import verify_nip98, verify_session_token, issue_session_token
 from .couch import couch_get, couch_put, couch_post, couch_delete, get_basic_auth_header, proxy_request
 from .app_loader import load_applications
 from .virtual_tables import (
@@ -19,11 +19,10 @@ __all__ = [
     # Config
     "Config",
     "setup_logging",
-    # Auth
-    "verify_jwt",
-    "decode_token_unsafe",
-    "get_jwks_client",
-    "extract_bearer_token",
+    # Auth (NIP-98)
+    "verify_nip98",
+    "verify_session_token",
+    "issue_session_token",
     # CouchDB
     "couch_get",
     "couch_put",

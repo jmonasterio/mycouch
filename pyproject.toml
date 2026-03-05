@@ -12,13 +12,10 @@ authors = [
 dependencies = [
     "fastapi",
     "uvicorn",
-    "pyjwt>=2.4.0", # Includes PyJWKClient for RS256 validation
-    "cryptography", # For RSA key handling
-    "httpx",
-    "python-dotenv",
-    "pydantic",
-    "clerk-backend-api", # Clerk Backend API for session management
-    "slowapi>=0.1.5", # Rate limiting library
+    "httpx>=0.24.0",           # async HTTP client (used by DAL, tests, starlette TestClient)
+    "python-dotenv",           # .env loading
+    "coincurve",               # secp256k1 Schnorr for Nostr NIP-98 verification
+    "slowapi>=0.1.5",          # Rate limiting
 ]
 
 [project.optional-dependencies]

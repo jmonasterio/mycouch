@@ -297,6 +297,17 @@ class TestTenantManagement:
         
         tenant_id = tenant["_id"]
         
+        # Create user_bob document so add_user_to_tenant can update their tenants array
+        await memory_dal.put_document("couch-sitter", "user_bob", {
+            "_id": "user_bob",
+            "type": "user",
+            "sub": "user_bob_sub",
+            "email": "bob@example.com",
+            "name": "Bob",
+            "tenants": [],
+            "tenantIds": []
+        })
+        
         # Add another user
         result = await couch_sitter_service.add_user_to_tenant(
             tenant_id=tenant_id,
@@ -308,7 +319,9 @@ class TestTenantManagement:
         assert len(result["userIds"]) == 2
         
         # Verify role was added to user's tenants array
-        role = await couch_sitter_service.get_user_role_for_tenant("user_bob", tenant_id)
+        # add_user_to_tenant stores tenantId in virtual format (no 'tenant_' prefix)
+        tenant_id_virtual = tenant_id[len("tenant_"):] if tenant_id.startswith("tenant_") else tenant_id
+        role = await couch_sitter_service.get_user_role_for_tenant("user_bob", tenant_id_virtual)
         assert role == "member"
 
 
@@ -536,11 +549,11 @@ class TestInvitationAcceptanceComplete:
         
         # ===== SETUP: Create inviter and invitee =====
         inviter_sub = "user_alice_sub_123"
-        inviter_hash = couch_sitter_service._hash_sub(inviter_sub)
+        inviter_hash = couch_sitter_service._hash_pubkey(inviter_sub)
         inviter_id = f"user_{inviter_hash}"
         
         invitee_sub = "user_bob_sub_456"
-        invitee_hash = couch_sitter_service._hash_sub(invitee_sub)
+        invitee_hash = couch_sitter_service._hash_pubkey(invitee_sub)
         invitee_id = f"user_{invitee_hash}"
         
         # Create both users
@@ -637,12 +650,12 @@ class TestInvitationAcceptanceComplete:
         # ===== VERIFY RESULT 4: Tenant visible via get_user_tenants() =====
         visible_tenants, _ = await couch_sitter_service.get_user_tenants(invitee_sub)
         visible_tenant_ids = [t["tenantId"] for t in visible_tenants]
-        assert workspace_id_virtual in visible_tenant_ids, \
-            f"Workspace {workspace_id_virtual} should be visible. Got: {visible_tenant_ids}"
+        assert workspace_id in visible_tenant_ids, \
+            f"Workspace {workspace_id} should be visible. Got: {visible_tenant_ids}"
         
         # Verify the visible tenant has correct metadata
         visible_workspace = next(
-            (t for t in visible_tenants if t["tenantId"] == workspace_id_virtual),
+            (t for t in visible_tenants if t["tenantId"] == workspace_id),
             None
         )
         assert visible_workspace is not None
@@ -669,11 +682,11 @@ class TestInvitationAcceptanceComplete:
         
         # ===== SETUP =====
         inviter_sub = "user_alice_sub_789"
-        inviter_hash = couch_sitter_service._hash_sub(inviter_sub)
+        inviter_hash = couch_sitter_service._hash_pubkey(inviter_sub)
         inviter_id = f"user_{inviter_hash}"
         
         invitee_sub = "user_bob_sub_789"
-        invitee_hash = couch_sitter_service._hash_sub(invitee_sub)
+        invitee_hash = couch_sitter_service._hash_pubkey(invitee_sub)
         invitee_id = f"user_{invitee_hash}"
         
         await couch_sitter_service.create_user_with_personal_tenant_multi_tenant(
@@ -813,7 +826,7 @@ class TestInvitationAcceptanceComplete:
         # ===== QUERY FOR TENANTS =====
         # Simulate what virtual_tables.py does in list_tenants()
         query = {"selector": {"type": "tenant"}}
-        result = await memory_dal.query("couch-sitter", query)
+        result = await memory_dal.query_documents("couch-sitter", query)
         all_docs = result.get("docs", [])
         
         # Filter like the endpoint does

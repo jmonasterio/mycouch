@@ -1,82 +1,38 @@
 """
-Authentication Middleware for Tenant/Invitation Endpoints
+Authentication middleware for tenant/invitation endpoints.
 
-Extracts user info from JWT for API routes.
+Verifies Bearer session tokens issued by POST /auth/session.
+The session token is obtained by authenticating once with NIP-98.
 """
-
-from fastapi import Depends, HTTPException, Header
-from typing import Optional, Dict, Any
 import logging
-import hashlib
+from typing import Any, Dict, Optional
+
+from fastapi import Header, HTTPException, Request
+
+from .core.auth import verify_session_token
 
 logger = logging.getLogger(__name__)
 
 
-# This will be set by the FastAPI app during initialization
-clerk_service = None
+async def get_current_user(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    """Extract and verify the current user from a Bearer session token.
 
-
-def set_clerk_service(service):
-    """Set the clerk service instance (called by main.py)"""
-    global clerk_service
-    clerk_service = service
-
-
-async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    """
-    Extract user info from JWT token in Authorization header.
-    
     Returns:
-        Dict with user_id, tenant_id, sub, email, name, application_id
-        
+        Dict with user_id, sub (pubkey), email, name, issuer, azp
+
     Raises:
-        HTTPException: If token is missing or invalid
+        HTTPException(401): If token is missing or invalid
     """
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing authorization header")
+    payload = verify_session_token(authorization)
 
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-    token = authorization.split(" ", 1)[1]
-
-    try:
-        if not clerk_service:
-            raise HTTPException(status_code=500, detail="Authentication service not available")
-
-        # Validate JWT and extract user information
-        user_info = await clerk_service.get_user_from_jwt(token)
-        if not user_info:
-            raise HTTPException(status_code=401, detail="Invalid JWT token")
-
-        # Extract required fields
-        sub = user_info.get("sub")
-        email = user_info.get("email")
-        name = user_info.get("name")
-        issuer = user_info.get("iss")
-        azp = user_info.get("azp")  # Authorized party - tells us where request came from
-
-        if not sub:
-            raise HTTPException(status_code=401, detail="Invalid token: missing sub claim")
-
-        # Convert sub to user_id format used in database
-        # CRITICAL: Hash the sub to create the database user ID
-        # This matches the format used in ensure_user_exists()
-        sub_hash = hashlib.sha256(sub.encode('utf-8')).hexdigest()
-        user_id = f"user_{sub_hash}"  # Correct format: user_{hash}
-
-        return {
-            "user_id": user_id,
-            "sub": sub,
-            "email": email,
-            "name": name,
-            "issuer": issuer,
-            "azp": azp,  # Pass through azp for applicationId determination
-            "application_id": "roady"  # Deprecated, use azp instead
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error extracting user from token: {e}")
-        raise HTTPException(status_code=401, detail="Failed to validate token")
+    return {
+        "user_id": payload["user_id"],
+        "sub": payload["pubkey"],   # pubkey is the stable Nostr identity
+        "email": None,              # not available in NIP-98
+        "name": None,               # not available in NIP-98
+        "issuer": "nostr",
+        "azp": None,
+    }

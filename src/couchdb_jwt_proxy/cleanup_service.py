@@ -111,16 +111,16 @@ class CleanupService:
             interval_seconds = self.cleanup_interval_hours * 3600
             
             while True:
+                # Sleep first — cleanup must not fire during startup before CouchDB is ready.
+                logger.debug(f"[CleanupService] Sleeping for {interval_seconds}s until next cleanup")
+                await asyncio.sleep(interval_seconds)
+
                 try:
                     logger.info(f"[CleanupService] Running cleanup (every {self.cleanup_interval_hours} hours)")
                     result = await self.cleanup_expired_sessions()
                     logger.info(f"[CleanupService] Cleanup result: {result}")
                 except Exception as e:
                     logger.error(f"[CleanupService] Cleanup loop error: {e}", exc_info=True)
-                
-                # Sleep until next cleanup
-                logger.debug(f"[CleanupService] Sleeping for {interval_seconds}s until next cleanup")
-                await asyncio.sleep(interval_seconds)
 
         # Create and store the task
         self._cleanup_task = asyncio.create_task(cleanup_loop())

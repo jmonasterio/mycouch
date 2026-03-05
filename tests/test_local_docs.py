@@ -15,46 +15,22 @@ async def async_client():
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
 
-@pytest.fixture
-def mock_couch_sitter_jwt_payload():
-    """Mock Clerk JWT payload for couch-sitter admin app"""
-    return {
-        "sub": "user_admin123",
-        "email": "admin@example.com",
-        "iss": "https://enabled-hawk-56.clerk.accounts.dev", # Known couch-sitter issuer
-        "aud": "couch-sitter",
-        "iat": 1699561200,
-        "exp": 1699564800
-    }
-
 @pytest.mark.asyncio
 class TestLocalDocs:
     """Test access to _local documents"""
 
-    async def test_get_local_doc(self, async_client, mock_couch_sitter_jwt_payload):
+    async def test_get_local_doc(self, async_client):
         """Test GET /dbname/_local/docid"""
-        
-        # Mock dependencies
-        with patch('couchdb_jwt_proxy.main.verify_clerk_jwt') as mock_verify, \
-             patch('couchdb_jwt_proxy.main.couch_sitter_service') as mock_couch_sitter, \
-             patch('couchdb_jwt_proxy.main.clerk_service') as mock_clerk_service, \
-             patch('couchdb_jwt_proxy.main.APPLICATIONS', {"https://enabled-hawk-56.clerk.accounts.dev": ["couch-sitter"]}):
 
-            mock_verify.return_value = (mock_couch_sitter_jwt_payload, None)
+        with patch('couchdb_jwt_proxy.main.verify_session_token', return_value={'pubkey': 'a' * 64, 'user_id': 'user_admin123'}), \
+             patch('couchdb_jwt_proxy.main.extract_tenant', new_callable=AsyncMock, return_value='tenant_admin_123'):
 
-            # Mock tenant extraction
-            mock_couch_sitter.get_user_tenant_info = AsyncMock(return_value=MagicMock(
-                tenant_id="tenant_123",
-                user_id="user_admin123",
-                sub=mock_couch_sitter_jwt_payload["sub"]
-            ))
-            
             # Populate Memory DAL with local doc
             # Note: The doc_id in the URL will be URL-encoded, but we store it decoded
             doc_id_encoded = "bYxg4wx2CFPpDakNrACmCA%3D%3D"
             doc_id_decoded = "bYxg4wx2CFPpDakNrACmCA=="
             local_doc = {"_id": f"_local/{doc_id_decoded}", "rev": "1-abc"}
-            
+
             await dal.get(f"/couch-sitter/_local/{doc_id_decoded}", "PUT", local_doc)
 
             # Make request to _local doc (URL will have encoded version)

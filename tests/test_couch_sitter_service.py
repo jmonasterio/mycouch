@@ -64,23 +64,23 @@ class TestCouchSitterService:
         assert service.couchdb_password is None
         assert service.auth_headers == {}
 
-    def test_hash_sub(self):
-        """Test SHA256 hashing of sub claim"""
+    def test_hash_pubkey(self):
+        """Test SHA256 hashing of pubkey"""
         service = CouchSitterService("http://localhost:5984/test")
 
         sub = "user_test123"
-        hash_result = service._hash_sub(sub)
+        hash_result = service._hash_pubkey(sub)
 
         # Should be SHA256 hash
         assert len(hash_result) == 64  # SHA256 produces 64-char hex string
         assert hash_result != sub
 
         # Should be consistent
-        hash_result2 = service._hash_sub(sub)
+        hash_result2 = service._hash_pubkey(sub)
         assert hash_result == hash_result2
 
         # Different subs should produce different hashes
-        different_hash = service._hash_sub("different_sub")
+        different_hash = service._hash_pubkey("different_sub")
         assert hash_result != different_hash
 
     @pytest.mark.asyncio
@@ -317,7 +317,7 @@ class TestCouchSitterService:
         sub = "user_with_tenant"
         sub_hash = hashlib.sha256(sub.encode()).hexdigest()
         user_id = f"user_{sub_hash}"
-        tenant_id = "existing_tenant_123"
+        tenant_id = 'tenant_existing_123'
 
         user_doc = {
             "_id": user_id,
