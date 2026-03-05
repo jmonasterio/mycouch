@@ -79,6 +79,5 @@ jobs:
           grep -q 'USER_CACHE_TTL_SECONDS' .env || echo 'USER_CACHE_TTL_SECONDS=300' >> .env
           # Sync dependencies using explicit path (uv may not be on default SSH PATH)
           /home/jm/.local/bin/uv sync --no-dev
- service file changes require manual: sudo cp config/mycouch.service /etc/systemd/system/ && sudo systemctl daemon-reload
           sudo systemctl restart mycouch
           EOF
