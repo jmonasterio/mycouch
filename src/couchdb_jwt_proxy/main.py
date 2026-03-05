@@ -64,7 +64,7 @@ SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", str(8 * 3600)))
 NIP98_TIME_TOLERANCE = int(os.getenv("NIP98_TIME_TOLERANCE", "60"))
 APPLICATION_ID = os.getenv("APPLICATION_ID", "roady")
 
-USER_CACHE_TTL_SECONDS = os.getenv("USER_CACHE_TTL_SECONDS")
+USER_CACHE_TTL_SECONDS_STR = os.getenv("USER_CACHE_TTL_SECONDS", "300")
 
 # Allowed CouchDB endpoints for PouchDB
 # Note: '/' removed because it was matching all document IDs as a prefix
@@ -107,8 +107,6 @@ if not TENANT_FIELD:
 if not COUCH_SITTER_DB_URL:
     missing_vars.append("COUCH_SITTER_DB_URL")
 
-if not USER_CACHE_TTL_SECONDS:
-    missing_vars.append("USER_CACHE_TTL_SECONDS")
 
 if missing_vars:
     raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}. Configure these in your .env file.")
@@ -120,7 +118,7 @@ except ValueError:
     raise ValueError("PROXY_PORT must be a valid integer. Configure this in your .env file.")
 
 try:
-    USER_CACHE_TTL_SECONDS = int(USER_CACHE_TTL_SECONDS)
+    USER_CACHE_TTL_SECONDS = int(USER_CACHE_TTL_SECONDS_STR)
 except ValueError:
     raise ValueError("USER_CACHE_TTL_SECONDS must be a valid integer. Configure this in your .env file.")
 

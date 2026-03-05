@@ -70,6 +70,12 @@ jobs:
         run: |
           ssh ${{ secrets.DEPLOY_USER }}@argw.com << 'EOF'
           cd /var/www/argw.com/mycouch
+          # Inject new env vars if not already present (preserves existing values)
+          grep -q 'SESSION_SECRET' .env || echo "SESSION_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> .env
+          grep -q 'SESSION_TTL_SECONDS' .env || echo 'SESSION_TTL_SECONDS=28800' >> .env
+          grep -q 'NIP98_TIME_TOLERANCE' .env || echo 'NIP98_TIME_TOLERANCE=60' >> .env
+          grep -q 'APPLICATION_ID' .env || echo 'APPLICATION_ID=roady' >> .env
+          grep -q 'USER_CACHE_TTL_SECONDS' .env || echo 'USER_CACHE_TTL_SECONDS=300' >> .env
           uv sync --no-dev
           sudo systemctl restart mycouch || echo "Service restart skipped"
           EOF
