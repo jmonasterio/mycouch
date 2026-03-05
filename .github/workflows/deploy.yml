@@ -70,6 +70,6 @@ jobs:
         run: |
           ssh ${{ secrets.DEPLOY_USER }}@argw.com << 'EOF'
           cd /var/www/argw.com/mycouch
-          # If using systemd service (adjust service name as needed)
+          uv sync --no-dev
           sudo systemctl restart mycouch || echo "Service restart skipped"
           EOF
